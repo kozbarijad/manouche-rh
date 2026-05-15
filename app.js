@@ -279,6 +279,11 @@ const state = {
   punches: {},       // key `${empId}_${dateISO}` → [{in:'08:32',out:'14:15',meta?}]
   publications: {},  // key weekKey → {publishedAt, by, note}
   absenceRequests: {}, // keyed by request id
+  emargements: {},   // key `${empId}_${weekKey}` → {signedAt, userAgent}
+  pourboires: {},    // key `${empId}_${yyyy-mm}` → amount in € (monthly)
+  duerp: null,       // {updatedAt, docId, dueAt}
+  affichages: {},    // key affichage name → {present, photoDocId, updatedAt}
+  payslips: {},      // key `${empId}_${yyyy-mm}` → {docId, sentAt, ackBy?}
   weekStart: getMonday(new Date()),
   fbReady: false,
   page: null,        // current page id
@@ -308,6 +313,23 @@ function normEmp(e) {
     reposCompensateur: 0, recupJoursFeries: 0,
     travailleurEtranger: false, titreSejourType: '',
     titreSejourNumero: '', titreSejourDebut: '', titreSejourFin: '',
+    // NOUVEAU — Conformité
+    periodeEssaiRenouvelable: false,
+    periodeEssaiRenouveleeAt: '',  // date du renouvellement si fait
+    contratSigneAt: '',             // date de signature du contrat
+    autorisationTravailNumero: '',  // numéro autorisation prefecture (étrangers)
+    autorisationTravailFin: '',     // date d'expiration
+    navigoDernierRenouvellement: '',// date du dernier achat/renouvellement annuel
+    visiteMedicaleAt: '',           // date de la dernière visite médicale
+    visiteMedicaleType: '',         // 'embauche' | 'periodique' | 'reprise'
+    visiteMedicaleProchaine: '',    // date prévue prochaine visite
+    mutuelleAdhesionAt: '',
+    mutuelleDispensee: false,
+    mutuelleDispenseRaison: '',
+    dpaeFaiteAt: '',                // date DPAE
+    certifHACCP: false,             // formation hygiène
+    certifHACCPDate: '',
+    permisB: false, permisBFin: '',
     peutSeConnecter: true,
     dispos: { 0: true, 1: true, 2: true, 3: true, 4: true, 5: true, 6: true },
     avenants: [], documents: [],
@@ -319,6 +341,295 @@ function isProfileComplete(e) {
   const n = normEmp(e);
   return !!(n.email && n.telMobile && n.dateNaissance && n.adresse && n.codePostal && n.ville && n.contratDebut);
 }
+
+// ─────────── RAPPELS / ÉCHÉANCES ───────────
+function daysBetween(fromISO, toISO) {
+  const a = new Date(fromISO + 'T00:00:00');
+  const b = new Date(toISO + 'T00:00:00');
+  return Math.round((b - a) / (1000 * 60 * 60 * 24));
+}
+
+function computeRappels() {
+  const out = [];
+  const todayISO = dateISO(new Date());
+  const today = new Date(todayISO + 'T00:00:00');
+
+  state.employees.forEach(e => {
+    if (e.statut !== 'Actif') return;
+    const n = normEmp(e);
+    const empLabel = `${e.prenom} ${e.nom}`;
+
+    // 1. Contrat signé ?
+    if (n.contratDebut && !n.contratSigneAt) {
+      const ds = daysBetween(todayISO, n.contratDebut);
+      if (ds <= 7) {
+        out.push({
+          type: 'contrat_signe',
+          empId: e.id, empLabel,
+          label: 'Contrat à faire signer',
+          detail: `Début de contrat ${n.contratDebut ? fmtDateShort(n.contratDebut) : ''} — aucune signature enregistrée`,
+          dueDate: n.contratDebut, daysLeft: ds,
+          severity: ds < 0 ? 'alert' : (ds < 3 ? 'warn' : 'info'),
+          action: 'Marquer le contrat comme signé dans la fiche salarié'
+        });
+      }
+    }
+
+    // 2. Fin de période d'essai
+    if (n.contratDebut && n.periodeEssaiJours > 0 && !n.dateSortie) {
+      const fin = new Date(n.contratDebut + 'T00:00:00');
+      fin.setDate(fin.getDate() + n.periodeEssaiJours);
+      const finISO = dateISO(fin);
+      const ds = daysBetween(todayISO, finISO);
+      if (ds <= 14 && ds >= -7) {
+        out.push({
+          type: 'fin_essai',
+          empId: e.id, empLabel,
+          label: ds < 0 ? 'Période d\'essai terminée' : 'Fin de période d\'essai',
+          detail: `${n.periodeEssaiJours} jours · échéance ${fmtDateShort(finISO)}`,
+          dueDate: finISO, daysLeft: ds,
+          severity: ds < 0 ? 'info' : (ds <= 3 ? 'alert' : (ds <= 7 ? 'warn' : 'info')),
+          action: ds > 0 ? 'Décider : valider, rompre, ou renouveler avant cette date' : 'Période d\'essai validée par défaut'
+        });
+      }
+      // Renouvellement à anticiper (avant le terme initial)
+      if (n.periodeEssaiRenouvelable && !n.periodeEssaiRenouveleeAt && ds >= 0 && ds <= 7) {
+        out.push({
+          type: 'renouvellement_essai',
+          empId: e.id, empLabel,
+          label: 'Renouvellement période d\'essai possible',
+          detail: `À décider avant ${fmtDateShort(finISO)} (envoi LRAR + signature avant terme)`,
+          dueDate: finISO, daysLeft: ds,
+          severity: ds <= 2 ? 'alert' : 'warn',
+          action: 'Préparer la LRAR de renouvellement et la faire signer'
+        });
+      }
+    }
+
+    // 3. Fin de CDD
+    if (n.contratFin && !n.dateSortie) {
+      const ds = daysBetween(todayISO, n.contratFin);
+      if (ds <= 60 && ds >= -30) {
+        out.push({
+          type: 'fin_cdd',
+          empId: e.id, empLabel,
+          label: ds < 0 ? 'Contrat échu' : 'Fin de CDD',
+          detail: `${esc(e.contrat||'CDD')} — terme ${fmtDateShort(n.contratFin)}`,
+          dueDate: n.contratFin, daysLeft: ds,
+          severity: ds < 0 ? 'alert' : (ds <= 7 ? 'alert' : (ds <= 30 ? 'warn' : 'info')),
+          action: ds > 0 ? 'Préparer STC, certificat travail, attestation France Travail' : 'Régulariser sortie (DSN, soldes)'
+        });
+      }
+    }
+
+    // 4. Titre de séjour
+    if (n.travailleurEtranger && n.titreSejourFin) {
+      const ds = daysBetween(todayISO, n.titreSejourFin);
+      if (ds <= 120) {
+        out.push({
+          type: 'titre_sejour',
+          empId: e.id, empLabel,
+          label: ds < 0 ? 'Titre de séjour expiré' : 'Titre de séjour à renouveler',
+          detail: `${esc(n.titreSejourType||'Titre')} n° ${esc(n.titreSejourNumero||'—')} · expire ${fmtDateShort(n.titreSejourFin)}`,
+          dueDate: n.titreSejourFin, daysLeft: ds,
+          severity: ds < 0 ? 'alert' : (ds <= 30 ? 'alert' : (ds <= 60 ? 'warn' : 'info')),
+          action: ds < 0 ? 'URGENT : suspendre le salarié et l\'orienter en préfecture' : 'Demander RDV préfecture (la demande doit être déposée 2 mois avant)'
+        });
+      }
+    }
+
+    // 5. Autorisation de travail
+    if (n.travailleurEtranger && n.autorisationTravailFin) {
+      const ds = daysBetween(todayISO, n.autorisationTravailFin);
+      if (ds <= 90) {
+        out.push({
+          type: 'autorisation_travail',
+          empId: e.id, empLabel,
+          label: ds < 0 ? 'Autorisation de travail expirée' : 'Autorisation de travail à renouveler',
+          detail: `N° ${esc(n.autorisationTravailNumero||'—')} · expire ${fmtDateShort(n.autorisationTravailFin)}`,
+          dueDate: n.autorisationTravailFin, daysLeft: ds,
+          severity: ds < 0 ? 'alert' : (ds <= 15 ? 'alert' : (ds <= 45 ? 'warn' : 'info')),
+          action: ds < 0 ? 'URGENT : ne plus faire travailler le salarié, lourde sanction si contrôle' : 'Démarche en préfecture / SMOE'
+        });
+      }
+    }
+
+    // 6. Pass Navigo annuel (Imagine R / Navigo Annuel renouvellement)
+    if (n.navigoDernierRenouvellement) {
+      const lastDate = new Date(n.navigoDernierRenouvellement + 'T00:00:00');
+      const nextDate = new Date(lastDate); nextDate.setFullYear(nextDate.getFullYear()+1);
+      const nextISO = dateISO(nextDate);
+      const ds = daysBetween(todayISO, nextISO);
+      if (ds <= 45) {
+        out.push({
+          type: 'navigo',
+          empId: e.id, empLabel,
+          label: ds < 0 ? 'Navigo annuel expiré' : 'Renouvellement Navigo annuel',
+          detail: `Dernier renouvellement ${fmtDateShort(n.navigoDernierRenouvellement)} · à refaire ${fmtDateShort(nextISO)}`,
+          dueDate: nextISO, daysLeft: ds,
+          severity: ds < 0 ? 'warn' : (ds <= 15 ? 'warn' : 'info'),
+          action: 'Refaire la prise en charge employeur (remboursement 50% obligatoire)'
+        });
+      }
+    } else if (n.navigoMensuel > 0 && n.contratDebut) {
+      // Pas de date de renouvellement enregistrée mais le salarié a un navigo → rappel à renseigner
+      out.push({
+        type: 'navigo',
+        empId: e.id, empLabel,
+        label: 'Navigo : date à renseigner',
+        detail: `${n.navigoMensuel.toFixed(2)} €/mois remboursés — pas de date d'achat enregistrée`,
+        dueDate: todayISO, daysLeft: 0,
+        severity: 'info',
+        action: 'Renseigner la date du dernier renouvellement dans la fiche'
+      });
+    }
+
+    // 7. Visite médicale du travail (à faire dans les 3 mois après embauche, puis tous les 5 ans)
+    if (n.contratDebut && !n.visiteMedicaleAt && !n.dateSortie) {
+      const startDate = new Date(n.contratDebut + 'T00:00:00');
+      const deadline = new Date(startDate); deadline.setMonth(deadline.getMonth() + 3);
+      const ds = daysBetween(todayISO, dateISO(deadline));
+      if (ds <= 60) {
+        out.push({
+          type: 'visite_medicale',
+          empId: e.id, empLabel,
+          label: ds < 0 ? 'Visite médicale d\'embauche en retard' : 'Visite médicale d\'embauche',
+          detail: `À organiser sous 3 mois après embauche · échéance ${fmtDateShort(dateISO(deadline))}`,
+          dueDate: dateISO(deadline), daysLeft: ds,
+          severity: ds < 0 ? 'alert' : (ds <= 15 ? 'warn' : 'info'),
+          action: 'Programmer un RDV avec la médecine du travail (Centre Médical Inter-Entreprises)'
+        });
+      }
+    }
+    if (n.visiteMedicaleProchaine && !n.dateSortie) {
+      const ds = daysBetween(todayISO, n.visiteMedicaleProchaine);
+      if (ds <= 30) {
+        out.push({
+          type: 'visite_medicale_periodique',
+          empId: e.id, empLabel,
+          label: ds < 0 ? 'Visite médicale périodique en retard' : 'Visite médicale périodique',
+          detail: `Prochaine visite ${fmtDateShort(n.visiteMedicaleProchaine)}`,
+          dueDate: n.visiteMedicaleProchaine, daysLeft: ds,
+          severity: ds < 0 ? 'alert' : (ds <= 7 ? 'warn' : 'info'),
+          action: 'Programmer un RDV avec la médecine du travail'
+        });
+      }
+    }
+
+    // 8. HACCP / Formation hygiène (obligatoire en restauration commerciale)
+    if (!n.certifHACCP && n.contratDebut && !n.dateSortie) {
+      // Au moins 1 personne du staff doit être HACCP — alerte légère
+      // On laisse au manager de vérifier
+    }
+
+    // 9. DPAE
+    if (n.contratDebut && !n.dpaeFaiteAt) {
+      const ds = daysBetween(todayISO, n.contratDebut);
+      if (ds >= -7 && ds <= 1) {
+        out.push({
+          type: 'dpae',
+          empId: e.id, empLabel,
+          label: 'DPAE à confirmer',
+          detail: `Aucune trace de DPAE enregistrée pour ce salarié`,
+          dueDate: n.contratDebut, daysLeft: ds,
+          severity: ds <= 0 ? 'alert' : 'warn',
+          action: 'Vérifier la DPAE sur net-entreprises.fr ou marquer comme faite'
+        });
+      }
+    }
+
+    // 10. Entretien professionnel obligatoire tous les 2 ans
+    if (n.contratDebut && !n.dateSortie) {
+      const refDate = n.dernierEntretienPro || n.contratDebut;
+      const next = new Date(refDate + 'T00:00:00');
+      next.setFullYear(next.getFullYear() + 2);
+      const nextISO = dateISO(next);
+      const ds = daysBetween(todayISO, nextISO);
+      if (ds <= 90) {
+        out.push({
+          type: 'entretien_pro',
+          empId: e.id, empLabel,
+          label: ds < 0 ? 'Entretien pro EN RETARD' : 'Entretien professionnel à programmer',
+          detail: `Échéance ${fmtDateShort(nextISO)} · obligatoire tous les 2 ans (article L6315-1)`,
+          dueDate: nextISO, daysLeft: ds,
+          severity: ds < 0 ? 'alert' : (ds <= 30 ? 'warn' : 'info'),
+          action: ds < 0 ? 'URGENT : pénalité 3000 € abondement CPF si défaut' : 'Programmer un entretien de 30-60 min avec le salarié'
+        });
+      }
+    }
+
+    // 11. Visite médicale de reprise après arrêt maladie ≥ 30 jours
+    // Détection : on regarde les arrêts maladie consécutifs de l'employé
+    if (n.contratDebut && !n.dateSortie) {
+      const amDays = [];
+      Object.entries(state.shifts).forEach(([key, shifts]) => {
+        if (!key.startsWith(`${e.id}_`)) return;
+        const parts = key.split('_');
+        if (parts.length !== 3) return;
+        const dayIdx = parseInt(parts[1]);
+        const wk = parts[2];
+        if (!wk || isNaN(dayIdx)) return;
+        (shifts||[]).forEach(s => {
+          if (normShift(s).leaveType === 'arret_maladie') {
+            const d = addDays(new Date(wk + 'T00:00:00'), dayIdx);
+            amDays.push(dateISO(d));
+          }
+        });
+      });
+      amDays.sort();
+      // Find longest consecutive streak
+      let maxStreak = 0, curStreak = 0, streakEnd = null;
+      for (let i = 0; i < amDays.length; i++) {
+        if (i === 0 || daysBetween(amDays[i-1], amDays[i]) === 1) curStreak++;
+        else curStreak = 1;
+        if (curStreak > maxStreak) { maxStreak = curStreak; streakEnd = amDays[i]; }
+      }
+      if (maxStreak >= 30 && streakEnd) {
+        const reprise = addDays(new Date(streakEnd + 'T00:00:00'), 1);
+        const ds = daysBetween(todayISO, dateISO(reprise));
+        // Visit doit avoir lieu dans les 8 jours suivant la reprise
+        const deadline = addDays(reprise, 8);
+        const dsDeadline = daysBetween(todayISO, dateISO(deadline));
+        // Trigger only if visit not done after the streak
+        const visitOK = n.visiteMedicaleAt && n.visiteMedicaleAt > streakEnd && n.visiteMedicaleType === 'reprise';
+        if (!visitOK && dsDeadline <= 30 && dsDeadline >= -60) {
+          out.push({
+            type: 'visite_reprise',
+            empId: e.id, empLabel,
+            label: dsDeadline < 0 ? 'Visite de reprise EN RETARD' : 'Visite médicale de reprise obligatoire',
+            detail: `Arrêt maladie de ${maxStreak} jours · échéance visite ${fmtDateShort(dateISO(deadline))}`,
+            dueDate: dateISO(deadline), daysLeft: dsDeadline,
+            severity: dsDeadline < 0 ? 'alert' : 'warn',
+            action: 'Programmer RDV médecine du travail dans les 8 jours suivant la reprise (article R4624-31)'
+          });
+        }
+      }
+    }
+  });
+
+  // Sort by urgency: alert first, then by daysLeft
+  out.sort((a, b) => {
+    const sev = { alert: 0, warn: 1, info: 2 };
+    if (sev[a.severity] !== sev[b.severity]) return sev[a.severity] - sev[b.severity];
+    return a.daysLeft - b.daysLeft;
+  });
+  return out;
+}
+
+const RAPPEL_ICONS = {
+  contrat_signe: '✍️',
+  fin_essai: '⏱️',
+  renouvellement_essai: '🔄',
+  fin_cdd: '📋',
+  titre_sejour: '🛂',
+  autorisation_travail: '🛂',
+  navigo: '🚇',
+  visite_medicale: '⚕️',
+  visite_medicale_periodique: '⚕️',
+  visite_reprise: '⚕️',
+  dpae: '📝',
+  entretien_pro: '🤝',
+};
 
 // Compute CP pris from shifts for current year (auto-calculate from leave shifts)
 function computeCpPris(empId) {
@@ -385,6 +696,86 @@ function shiftHours(sh) {
 }
 function shiftsForCell(empId, dayIdx, wkKey=weekKey(state.weekStart)) {
   return state.shifts[`${empId}_${dayIdx}_${wkKey}`] || [];
+}
+
+// ─────────── HCR — Avantage en nature repas, coupures, repos ───────────
+// Convention HCR : 4,15 € par repas en 2025 (valeur DSN)
+const REPAS_HCR_VALEUR = 4.15;
+
+// Compte les repas pour un shift donné (1 si shift midi ou soir avec pause, 2 si journée continue couvrant midi ET soir)
+function repasPourShift(sh) {
+  if (!sh || isLeave(sh)) return 0;
+  const s = timeToMin(sh.start);
+  const e = timeToMin(sh.end);
+  const fin = e < s ? e + 24*60 : e;
+  // Repas du midi : si shift inclut 12:00-14:00
+  const midiOK = s <= 12*60 + 30 && fin >= 13*60 + 30;
+  // Repas du soir : si shift inclut 19:00-21:00
+  const soirOK = s <= 19*60 + 30 && fin >= 20*60 + 30;
+  return (midiOK ? 1 : 0) + (soirOK ? 1 : 0);
+}
+
+// Détecte une coupure : 2 shifts ou plus dans la même journée avec >1h d'écart
+function coupurePourJour(shifts) {
+  const realShifts = shifts.filter(s => !isLeave(s)).sort((a,b) => timeToMin(a.start) - timeToMin(b.start));
+  if (realShifts.length < 2) return 0;
+  let totalCoupure = 0;
+  for (let i = 1; i < realShifts.length; i++) {
+    const prevEnd = timeToMin(realShifts[i-1].end);
+    const curStart = timeToMin(realShifts[i].start);
+    const gap = curStart - prevEnd;
+    if (gap > 60) totalCoupure += gap;
+  }
+  return totalCoupure / 60; // en heures
+}
+
+// Calcule le repos hebdo le plus long (en heures) pour une semaine
+function reposHebdoMaximum(empId, wkStart) {
+  const wk = weekKey(wkStart);
+  let maxRepos = 0;
+  // On scan de la fin du dimanche précédent jusqu'au lundi suivant pour détecter le repos chevauchant
+  const events = []; // {ts, type:'end'|'start'}
+  for (let d = -1; d <= 7; d++) {
+    const day = addDays(wkStart, d);
+    const dayIdx = d < 0 ? 6 : (d > 6 ? 0 : d);
+    const wkRef = d < 0 ? weekKey(addDays(wkStart, -7)) : (d > 6 ? weekKey(addDays(wkStart, 7)) : wk);
+    const shifts = (state.shifts[`${empId}_${dayIdx}_${wkRef}`] || []).filter(s => !isLeave(s));
+    shifts.forEach(s => {
+      const startMin = day.getTime()/60000 + timeToMin(s.start);
+      let endMin = day.getTime()/60000 + timeToMin(s.end);
+      if (timeToMin(s.end) < timeToMin(s.start)) endMin += 24*60;
+      events.push({ ts: startMin, type: 'start' });
+      events.push({ ts: endMin, type: 'end' });
+    });
+  }
+  events.sort((a, b) => a.ts - b.ts);
+  for (let i = 0; i < events.length - 1; i++) {
+    if (events[i].type === 'end' && events[i+1].type === 'start') {
+      const gap = events[i+1].ts - events[i].ts;
+      // On garde uniquement les gaps qui chevauchent la semaine
+      const wkStartMin = wkStart.getTime()/60000;
+      const wkEndMin = addDays(wkStart, 7).getTime()/60000;
+      if (events[i+1].ts > wkStartMin && events[i].ts < wkEndMin) {
+        maxRepos = Math.max(maxRepos, gap / 60);
+      }
+    }
+  }
+  return maxRepos;
+}
+
+// Récap mensuel HCR par salarié pour la paie
+function hcrMensuelEmp(empId, year, month) {
+  const monthStart = new Date(year, month, 1);
+  const monthEnd = new Date(year, month+1, 0);
+  let repas = 0, coupures = 0;
+  for (let d = new Date(monthStart); d <= monthEnd; d = addDays(d, 1)) {
+    const dayIdx = (d.getDay() + 6) % 7;
+    const wk = weekKey(d);
+    const shifts = (state.shifts[`${empId}_${dayIdx}_${wk}`] || []).map(normShift);
+    shifts.forEach(s => repas += repasPourShift(s));
+    coupures += coupurePourJour(shifts);
+  }
+  return { repas, coupures, valeurRepas: repas * REPAS_HCR_VALEUR };
 }
 
 // ─────────── TOAST ───────────
@@ -612,7 +1003,7 @@ const DOC_CATEGORIES = {
 
 function fbListen() {
   if (!db) return;
-  ['employees','shifts','punches','publications','absenceRequests'].forEach(k => {
+  ['employees','shifts','punches','publications','absenceRequests','emargements','pourboires','duerp','affichages','payslips'].forEach(k => {
     db.ref(k).on('value', snap => {
       const v = snap.val();
       if (k === 'employees' && v) {
@@ -635,6 +1026,11 @@ function fbListen() {
       if (k === 'punches' && v) state.punches = v;
       if (k === 'publications' && v) state.publications = v;
       if (k === 'absenceRequests' && v) state.absenceRequests = v;
+      if (k === 'emargements' && v) state.emargements = v;
+      if (k === 'pourboires' && v) state.pourboires = v;
+      if (k === 'duerp' && v) state.duerp = v;
+      if (k === 'affichages' && v) state.affichages = v;
+      if (k === 'payslips' && v) state.payslips = v;
       render();
     }, err => {
       console.error('[fb] read error on', k, err);
@@ -816,6 +1212,30 @@ function detectAnomalies(empId=null, fromDate=null, toDate=null) {
           detail: `${emp.prenom} ${emp.nom} — semaine du ${new Date(wk).toLocaleDateString('fr-FR')} : ${totalReal.toFixed(1)}h pour un contrat ${limit}h`
         });
       }
+
+      // Rule 6 (HCR): repos hebdomadaire < 35h consécutives
+      const wkDate = new Date(wk + 'T00:00:00');
+      const wkEnd = addDays(wkDate, 6);
+      const todayD = new Date(); todayD.setHours(0,0,0,0);
+      // On ne checke que pour les semaines complétées (passées) ou en cours
+      if (wkDate <= todayD) {
+        const repos = reposHebdoMaximum(emp.id, wkDate);
+        // S'il y a au moins 1 shift cette semaine
+        let hasShifts = false;
+        for (let i = 0; i < 7; i++) {
+          if (((state.shifts[`${emp.id}_${i}_${wk}`])||[]).some(s => !isLeave(s))) { hasShifts = true; break; }
+        }
+        if (hasShifts && repos > 0 && repos < 35) {
+          anomalies.push({
+            type: 'repos_hebdo',
+            severity: repos < 24 ? 'alert' : 'warn',
+            empId: emp.id,
+            date: wk,
+            title: `Repos hebdomadaire insuffisant`,
+            detail: `${emp.prenom} ${emp.nom} — semaine du ${new Date(wk).toLocaleDateString('fr-FR')} : repos max ${repos.toFixed(1)}h (légal HCR : 35h consécutives)`
+          });
+        }
+      }
     });
   });
 
@@ -908,6 +1328,9 @@ function bindLogin() {
 function viewAdminShell() {
   const anomalies = detectAnomalies();
   const pendingReqs = Object.values(state.absenceRequests || {}).filter(r => r && r.status === 'pending').length;
+  const rappels = computeRappels();
+  const rappelsCount = rappels.filter(r => r.severity !== 'info').length;
+  const unsignedCount = countUnsignedEmargements();
 
   // Top-level sections — like Combo
   const TOP_SECTIONS = [
@@ -915,11 +1338,12 @@ function viewAdminShell() {
     { key: 'planning',  label: 'Planning', pages: ['planning', 'month'] },
     { key: 'team',      label: 'Équipe',   pages: ['employees'] },
     { key: 'hours',     label: 'Heures',   pages: ['hours', 'pointages'] },
-    { key: 'rh',        label: 'RH',       pages: ['requests', 'cp', 'rh', 'alerts'] },
+    { key: 'rh',        label: 'RH',       pages: ['requests', 'cp', 'rh', 'rappels', 'emargements', 'etablissement', 'alerts'] },
   ];
 
   const currentSection = TOP_SECTIONS.find(s => s.pages.includes(state.page)) || TOP_SECTIONS[0];
   const showSubNav = currentSection.key === 'rh';
+  const totalRhBadge = pendingReqs + rappelsCount;
 
   return `
     <div class="shell">
@@ -933,7 +1357,7 @@ function viewAdminShell() {
             ${TOP_SECTIONS.map(s => {
               const active = s.key === currentSection.key;
               const firstPage = s.pages[0];
-              return `<button class="topnav-link ${active?'active':''}" data-page="${firstPage}">${esc(s.label)}${s.key==='rh' && pendingReqs > 0 ? `<span class="dot-badge">${pendingReqs}</span>` : ''}</button>`;
+              return `<button class="topnav-link ${active?'active':''}" data-page="${firstPage}">${esc(s.label)}${s.key==='rh' && totalRhBadge > 0 ? `<span class="dot-badge">${totalRhBadge}</span>` : ''}</button>`;
             }).join('')}
           </nav>
           <div class="topnav-right">
@@ -979,15 +1403,27 @@ function viewAdminShell() {
       <div class="shell-body">
         ${showSubNav ? `
           <aside class="subnav">
-            <div class="subnav-section">RH</div>
+            <div class="subnav-section">Suivi RH</div>
             <button class="subnav-item ${state.page==='requests'?'active':''}" data-page="requests">
               Demandes d'absence
               ${pendingReqs > 0 ? `<span class="subnav-badge">${pendingReqs}</span>` : ''}
             </button>
             <button class="subnav-item ${state.page==='cp'?'active':''}" data-page="cp">Compteurs CP</button>
-            <button class="subnav-item ${state.page==='rh'?'active':''}" data-page="rh">Suivi RH</button>
+            <button class="subnav-item ${state.page==='rh'?'active':''}" data-page="rh">Suivi salariés</button>
+            <div class="subnav-section" style="margin-top:18px;">Conformité</div>
+            <button class="subnav-item ${state.page==='rappels'?'active':''}" data-page="rappels">
+              Rappels et échéances
+              ${rappelsCount > 0 ? `<span class="subnav-badge ${rappelsCount > 3 ? 'alert' : ''}">${rappelsCount}</span>` : ''}
+            </button>
+            <button class="subnav-item ${state.page==='emargements'?'active':''}" data-page="emargements">
+              Émargements
+              ${unsignedCount > 0 ? `<span class="subnav-badge">${unsignedCount}</span>` : ''}
+            </button>
+            <button class="subnav-item ${state.page==='etablissement'?'active':''}" data-page="etablissement">
+              Établissement
+            </button>
             <button class="subnav-item ${state.page==='alerts'?'active':''}" data-page="alerts">
-              Alertes
+              Alertes pointage
               ${anomalies.length ? `<span class="subnav-badge alert">${anomalies.length}</span>` : ''}
             </button>
           </aside>
@@ -1014,6 +1450,9 @@ function renderAdminPage() {
     case 'requests': return pageAbsenceRequests();
     case 'cp': return pageCpCompteurs();
     case 'rh': return pageRH();
+    case 'rappels': return pageRappels();
+    case 'emargements': return pageEmargements();
+    case 'etablissement': return pageEtablissement();
     default: return pageDashboard();
   }
 }
@@ -1043,6 +1482,9 @@ function bindAdmin() {
     case 'requests': bindAbsenceRequests(); break;
     case 'cp': bindCpCompteurs(); break;
     case 'rh': bindRH(); break;
+    case 'rappels': bindRappels(); break;
+    case 'emargements': bindEmargements(); break;
+    case 'etablissement': bindEtablissement(); break;
   }
 }
 
@@ -1812,6 +2254,13 @@ function pageHours() {
     const totalBrutPlanifie = salaireNormal + salaireS25 + salaireS50;
     const navigoMensuel = n.navigoMensuel || 0;
 
+    // HCR — repas et coupures (calcul auto sur les shifts du mois)
+    const hcr = hcrMensuelEmp(emp.id, year, month);
+
+    // Pourboires manuels (stockés dans state.pourboires[`${empId}_${year}-${month+1}`])
+    const moisKey = `${emp.id}_${year}-${pad(month+1)}`;
+    const pourboires = (state.pourboires && state.pourboires[moisKey]) || 0;
+
     return {
       emp, n,
       plannedTotal, realTotal,
@@ -1819,6 +2268,8 @@ function pageHours() {
       salaireNormal, salaireS25, salaireS50, totalBrutPlanifie,
       leaves, workedDays, ferieWorked,
       navigoMensuel,
+      repas: hcr.repas, valeurRepas: hcr.valeurRepas, coupures: hcr.coupures,
+      pourboires,
     };
   });
 
@@ -1895,6 +2346,9 @@ function pageHours() {
               <th>H. sup +50%</th>
               <th>Total H</th>
               <th>Brut estimé</th>
+              <th>Repas<br>(${REPAS_HCR_VALEUR}€)</th>
+              <th>Coupures</th>
+              <th>Pourboires</th>
               <th>Navigo</th>
               <th>CP</th>
               <th>AM</th>
@@ -1926,6 +2380,9 @@ function pageHours() {
                   <td class="mono tabular ${d.supplH50>0?'over':''}">${d.supplH50.toFixed(1)} h</td>
                   <td class="mono tabular"><strong>${(d.normalH+d.supplH25+d.supplH50).toFixed(1)} h</strong></td>
                   <td class="mono tabular"><strong>${d.totalBrutPlanifie.toFixed(2)} €</strong></td>
+                  <td class="mono tabular" title="${d.repas} repas × ${REPAS_HCR_VALEUR}€">${d.repas} · ${d.valeurRepas.toFixed(2)} €</td>
+                  <td class="mono tabular ${d.coupures > 0 ? 'over' : ''}">${d.coupures > 0 ? d.coupures.toFixed(1)+' h' : '—'}</td>
+                  <td class="mono tabular"><input type="number" class="input mini-input" data-tip="${d.emp.id}" value="${d.pourboires||''}" placeholder="0" step="0.01" style="width:70px;padding:4px 6px;font-size:11.5px;text-align:right;"></td>
                   <td class="mono tabular">${d.navigoMensuel ? d.navigoMensuel.toFixed(2)+' €' : '—'}</td>
                   <td class="mono tabular">${d.leaves.cp || '—'}</td>
                   <td class="mono tabular">${d.leaves.arret_maladie || '—'}</td>
@@ -1946,6 +2403,9 @@ function pageHours() {
                 <td class="mono tabular">${data.reduce((s,d) => s + d.supplH50, 0).toFixed(1)} h</td>
                 <td class="mono tabular"><strong>${teamTotalH.toFixed(1)} h</strong></td>
                 <td class="mono tabular"><strong>${teamTotalBrut.toFixed(2)} €</strong></td>
+                <td class="mono tabular"><strong>${data.reduce((s,d) => s + d.valeurRepas, 0).toFixed(2)} €</strong></td>
+                <td class="mono tabular">${data.reduce((s,d) => s + d.coupures, 0).toFixed(1)} h</td>
+                <td class="mono tabular"><strong>${data.reduce((s,d) => s + (d.pourboires||0), 0).toFixed(2)} €</strong></td>
                 <td class="mono tabular">${data.reduce((s,d) => s + (d.navigoMensuel||0), 0).toFixed(2)} €</td>
                 <td class="mono tabular">${data.reduce((s,d) => s + d.leaves.cp, 0) || '—'}</td>
                 <td class="mono tabular">${data.reduce((s,d) => s + d.leaves.arret_maladie, 0) || '—'}</td>
@@ -2024,6 +2484,24 @@ function bindHours() {
     state.page = 'employees';
     render();
   }));
+  // Pourboires inputs — save on blur
+  $$('[data-tip]').forEach(inp => {
+    inp.addEventListener('change', ev => {
+      const empId = parseInt(ev.currentTarget.dataset.tip);
+      const val = parseFloat(ev.currentTarget.value) || 0;
+      const anchor = state.monthAnchor || new Date();
+      const moisKey = `${empId}_${anchor.getFullYear()}-${pad(anchor.getMonth()+1)}`;
+      state.pourboires = state.pourboires || {};
+      if (val > 0) {
+        state.pourboires[moisKey] = val;
+        if (db) db.ref(`pourboires/${moisKey}`).set(val);
+      } else {
+        delete state.pourboires[moisKey];
+        if (db) db.ref(`pourboires/${moisKey}`).remove();
+      }
+      toast('Pourboires enregistrés', 'good');
+    });
+  });
   const exp1 = $('#exportPaieCsv');
   if (exp1) exp1.addEventListener('click', () => exportPaieCSV(false));
   const exp2 = $('#exportPaieDetailled');
@@ -2541,6 +3019,14 @@ function openInfoEditor() {
 // ── CONTRATS TAB ──
 function empTabContrats(n) {
   const avenants = n.avenants || [];
+  const today = new Date();
+  // Compute essai end
+  let essaiFin = null;
+  if (n.contratDebut && n.periodeEssaiJours > 0) {
+    essaiFin = new Date(n.contratDebut + 'T00:00:00');
+    essaiFin.setDate(essaiFin.getDate() + n.periodeEssaiJours);
+  }
+  const essaiInCours = essaiFin && today < essaiFin;
   return `
     <div class="panel">
       <div class="panel-head"><h3>Contrat en cours</h3></div>
@@ -2548,13 +3034,32 @@ function empTabContrats(n) {
         ${kvRow('Type', n.contrat || 'Non renseigné')}
         ${kvRow('Début du contrat', n.contratDebut ? fmtDateShort(n.contratDebut) : 'Non renseigné')}
         ${kvRow('Fin du contrat', n.contratFin ? fmtDateShort(n.contratFin) : (n.contrat==='CDI'?'Indéterminée':'Non renseigné'))}
-        ${kvRow('Période d\'essai', n.periodeEssaiJours ? `${n.periodeEssaiJours} jours` : 'Non renseigné')}
+        ${kvRow('Période d\'essai', n.periodeEssaiJours ? `${n.periodeEssaiJours} jours${essaiFin ? ` · échéance ${fmtDateShort(dateISO(essaiFin))}` : ''}` : 'Non renseigné')}
         ${kvRow('Poste', n.poste || 'Non renseigné')}
         ${kvRow('Rémunération mensuelle brute', n.remuneration ? `${n.remuneration} €` : 'Non renseigné')}
         ${kvRow('Taux horaire', n.taux ? `${n.taux} €/h` : 'Non renseigné')}
         ${kvRow('Durée de travail hebdomadaire', `${n.heures || 0}h`)}
         ${kvRow('Nb. de jours travaillés par semaine', `${n.joursTravailles || 5} jours`)}
         ${kvRow('Remboursement Navigo / mois', n.navigoMensuel ? `${n.navigoMensuel} €` : 'Non renseigné')}
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top:14px;">
+      <div class="panel-head"><h3>Conformité & administratif</h3></div>
+      <div class="panel-body">
+        ${kvRow('Contrat signé', n.contratSigneAt ? `<span class="chip good">✓ ${fmtDateShort(n.contratSigneAt)}</span>` : '<span class="chip warn">À faire signer</span>')}
+        ${kvRow('DPAE faite', n.dpaeFaiteAt ? `<span class="chip good">✓ ${fmtDateShort(n.dpaeFaiteAt)}</span>` : '<span class="chip warn">À confirmer</span>')}
+        ${kvRow('Période d\'essai renouvelable', n.periodeEssaiRenouvelable ? `Oui${n.periodeEssaiRenouveleeAt ? ` · renouvelée le ${fmtDateShort(n.periodeEssaiRenouveleeAt)}` : ''}` : 'Non')}
+        ${kvRow('Visite médicale d\'embauche', n.visiteMedicaleAt ? `<span class="chip good">✓ ${fmtDateShort(n.visiteMedicaleAt)}</span>` : '<span class="chip warn">À programmer (sous 3 mois)</span>')}
+        ${kvRow('Prochaine visite médicale', n.visiteMedicaleProchaine ? fmtDateShort(n.visiteMedicaleProchaine) : 'Non programmée')}
+        ${kvRow('Mutuelle', n.mutuelleDispensee ? `Dispensé(e)${n.mutuelleDispenseRaison ? ` (${esc(n.mutuelleDispenseRaison)})` : ''}` : (n.mutuelleAdhesionAt ? `<span class="chip good">Adhérent depuis ${fmtDateShort(n.mutuelleAdhesionAt)}</span>` : '<span class="chip warn">Non renseigné</span>'))}
+        ${kvRow('Dernier entretien professionnel', n.dernierEntretienPro ? fmtDateShort(n.dernierEntretienPro) : '<span class="chip">Aucun (obligatoire tous les 2 ans)</span>')}
+        ${kvRow('Formation HACCP', n.certifHACCP ? `<span class="chip good">✓ ${n.certifHACCPDate ? fmtDateShort(n.certifHACCPDate) : ''}</span>` : '<span class="chip">Non titulaire</span>')}
+        ${n.travailleurEtranger ? `
+          ${kvRow('Titre de séjour', n.titreSejourFin ? `${esc(n.titreSejourType||'')} jusqu'au ${fmtDateShort(n.titreSejourFin)}` : 'Non renseigné')}
+          ${kvRow('Autorisation de travail', n.autorisationTravailFin ? `n° ${esc(n.autorisationTravailNumero||'—')} · expire ${fmtDateShort(n.autorisationTravailFin)}` : 'Non renseigné')}
+        ` : ''}
+        ${kvRow('Pass Navigo renouvelé le', n.navigoDernierRenouvellement ? fmtDateShort(n.navigoDernierRenouvellement) : 'Non renseigné')}
       </div>
     </div>
 
@@ -2583,8 +3088,10 @@ function empTabContrats(n) {
       </div>
     </div>
 
-    <div class="row" style="justify-content:center;margin-top:18px;">
-      <button class="btn-pri" id="editContrat" style="width:auto;padding:10px 18px;">✎ Modifier le contrat en cours</button>
+    <div class="row" style="justify-content:center;gap:8px;margin-top:18px;flex-wrap:wrap;">
+      <button class="btn-pri" id="editContrat" style="width:auto;">✎ Modifier le contrat</button>
+      <button class="btn-sec" id="editConformite" style="width:auto;">⚖️ Conformité</button>
+      ${!n.dateSortie ? `<button class="btn-sec" id="openPackSortie" style="width:auto;">📋 Pack sortie</button>` : `<span class="chip alert">Sortie le ${fmtDateShort(n.dateSortie)} · ${esc(n.motifSortie||'—')}</span>`}
     </div>
   `;
 }
@@ -2593,6 +3100,10 @@ function bindEmpTabContrats() {
   $('#editContrat').addEventListener('click', () => openContratEditor());
   const addBtn = $('#addAvenant');
   if (addBtn) addBtn.addEventListener('click', () => openAvenantEditor());
+  const confBtn = $('#editConformite');
+  if (confBtn) confBtn.addEventListener('click', () => openConformiteEditor());
+  const psBtn = $('#openPackSortie');
+  if (psBtn) psBtn.addEventListener('click', () => openPackSortie(state.empDetail));
   $$('[data-del-avenant]').forEach(b => b.addEventListener('click', ev => {
     const i = parseInt(ev.currentTarget.dataset.delAvenant);
     if (!confirm('Supprimer cet avenant ?')) return;
@@ -2689,6 +3200,134 @@ function openAvenantEditor() {
     state.employees = state.employees.map(x => x.id === e.id ? updated : x);
     fbSave('employees', state.employees);
     toast('Avenant ajouté', 'good');
+    close();
+    render();
+  });
+}
+
+// ── Conformité editor ──
+function openConformiteEditor() {
+  const e = state.employees.find(x => x.id === state.empDetail);
+  const n = normEmp(e);
+  const body = `
+    <div class="modal-section-title">Signature et déclarations</div>
+    <div class="form-grid">
+      <div class="field"><label class="field-label">Contrat signé le</label><input class="input" id="cfContratSigneAt" type="date" value="${n.contratSigneAt||''}"></div>
+      <div class="field"><label class="field-label">DPAE faite le</label><input class="input" id="cfDpaeFaiteAt" type="date" value="${n.dpaeFaiteAt||''}"></div>
+      <div class="field full">
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">
+          <input type="checkbox" id="cfEssaiRenouvelable" ${n.periodeEssaiRenouvelable?'checked':''}>
+          Période d'essai renouvelable
+        </label>
+      </div>
+      <div class="field full"><label class="field-label">Renouvellement effectué le</label><input class="input" id="cfEssaiRenouvAt" type="date" value="${n.periodeEssaiRenouveleeAt||''}"></div>
+    </div>
+
+    <div class="modal-section-title">Médecine du travail</div>
+    <div class="form-grid">
+      <div class="field"><label class="field-label">Dernière visite médicale</label><input class="input" id="cfVMAt" type="date" value="${n.visiteMedicaleAt||''}"></div>
+      <div class="field">
+        <label class="field-label">Type</label>
+        <select class="input" id="cfVMType">
+          <option value="">—</option>
+          <option ${n.visiteMedicaleType==='embauche'?'selected':''} value="embauche">Embauche</option>
+          <option ${n.visiteMedicaleType==='periodique'?'selected':''} value="periodique">Périodique</option>
+          <option ${n.visiteMedicaleType==='reprise'?'selected':''} value="reprise">Reprise après arrêt</option>
+        </select>
+      </div>
+      <div class="field full"><label class="field-label">Prochaine visite prévue</label><input class="input" id="cfVMNext" type="date" value="${n.visiteMedicaleProchaine||''}"></div>
+    </div>
+
+    <div class="modal-section-title">Mutuelle</div>
+    <div class="form-grid">
+      <div class="field full">
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">
+          <input type="checkbox" id="cfMutDisp" ${n.mutuelleDispensee?'checked':''}>
+          Salarié(e) dispensé(e) de la mutuelle
+        </label>
+      </div>
+      <div class="field"><label class="field-label">Adhésion mutuelle le</label><input class="input" id="cfMutAt" type="date" value="${n.mutuelleAdhesionAt||''}"></div>
+      <div class="field"><label class="field-label">Motif de dispense</label>
+        <select class="input" id="cfMutRaison">
+          <option value="">—</option>
+          <option ${n.mutuelleDispenseRaison==='CDD < 3 mois'?'selected':''}>CDD < 3 mois</option>
+          <option ${n.mutuelleDispenseRaison==='Couverture conjoint'?'selected':''}>Couverture conjoint</option>
+          <option ${n.mutuelleDispenseRaison==='CSS / ACS'?'selected':''}>CSS / ACS</option>
+          <option ${n.mutuelleDispenseRaison==='Multi-employeur'?'selected':''}>Multi-employeur</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="modal-section-title">Formation et entretiens</div>
+    <div class="form-grid">
+      <div class="field full">
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">
+          <input type="checkbox" id="cfHACCP" ${n.certifHACCP?'checked':''}>
+          Titulaire de la formation HACCP / hygiène alimentaire
+        </label>
+      </div>
+      <div class="field"><label class="field-label">Date de la formation HACCP</label><input class="input" id="cfHACCPDate" type="date" value="${n.certifHACCPDate||''}"></div>
+      <div class="field"><label class="field-label">Dernier entretien professionnel</label><input class="input" id="cfEntretien" type="date" value="${n.dernierEntretienPro||''}"></div>
+    </div>
+
+    <div class="modal-section-title">Travailleur étranger</div>
+    <div class="form-grid">
+      <div class="field full">
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">
+          <input type="checkbox" id="cfEtranger" ${n.travailleurEtranger?'checked':''}>
+          Salarié(e) de nationalité étrangère hors UE/EEE
+        </label>
+      </div>
+      <div class="field"><label class="field-label">N° titre de séjour</label><input class="input" id="cfTSNum" value="${esc(n.titreSejourNumero||'')}"></div>
+      <div class="field"><label class="field-label">Type titre de séjour</label>
+        <select class="input" id="cfTSType">
+          <option value="">—</option>
+          ${['Carte de séjour temporaire','Carte de résident','APS','Récépissé','Titre étudiant','Visa long séjour'].map(t => `<option ${n.titreSejourType===t?'selected':''}>${t}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field"><label class="field-label">Titre valide jusqu'au</label><input class="input" id="cfTSFin" type="date" value="${n.titreSejourFin||''}"></div>
+      <div class="field"><label class="field-label">N° autorisation travail</label><input class="input" id="cfATNum" value="${esc(n.autorisationTravailNumero||'')}"></div>
+      <div class="field full"><label class="field-label">Autorisation travail expire le</label><input class="input" id="cfATFin" type="date" value="${n.autorisationTravailFin||''}"></div>
+    </div>
+
+    <div class="modal-section-title">Transports</div>
+    <div class="form-grid">
+      <div class="field full"><label class="field-label">Pass Navigo renouvelé le</label><input class="input" id="cfNavigoAt" type="date" value="${n.navigoDernierRenouvellement||''}"></div>
+    </div>
+  `;
+  const footer = `
+    <button class="btn-sec" data-close>Annuler</button>
+    <button class="btn-pri" id="cfSave" style="width:auto;">Enregistrer</button>
+  `;
+  const { close } = openModal({ title: 'Conformité & administratif', body, footer });
+
+  $('#cfSave').addEventListener('click', () => {
+    const updated = {
+      ...e,
+      contratSigneAt: $('#cfContratSigneAt').value,
+      dpaeFaiteAt: $('#cfDpaeFaiteAt').value,
+      periodeEssaiRenouvelable: $('#cfEssaiRenouvelable').checked,
+      periodeEssaiRenouveleeAt: $('#cfEssaiRenouvAt').value,
+      visiteMedicaleAt: $('#cfVMAt').value,
+      visiteMedicaleType: $('#cfVMType').value,
+      visiteMedicaleProchaine: $('#cfVMNext').value,
+      mutuelleDispensee: $('#cfMutDisp').checked,
+      mutuelleAdhesionAt: $('#cfMutAt').value,
+      mutuelleDispenseRaison: $('#cfMutRaison').value,
+      certifHACCP: $('#cfHACCP').checked,
+      certifHACCPDate: $('#cfHACCPDate').value,
+      dernierEntretienPro: $('#cfEntretien').value,
+      travailleurEtranger: $('#cfEtranger').checked,
+      titreSejourNumero: $('#cfTSNum').value.trim(),
+      titreSejourType: $('#cfTSType').value,
+      titreSejourFin: $('#cfTSFin').value,
+      autorisationTravailNumero: $('#cfATNum').value.trim(),
+      autorisationTravailFin: $('#cfATFin').value,
+      navigoDernierRenouvellement: $('#cfNavigoAt').value,
+    };
+    state.employees = state.employees.map(x => x.id === e.id ? updated : x);
+    fbSave('employees', state.employees);
+    toast('Conformité mise à jour', 'good');
     close();
     render();
   });
@@ -3519,6 +4158,654 @@ function bindRH() {
   }));
 }
 
+// ─────────── PAGE RAPPELS / ÉCHÉANCES ───────────
+function pageRappels() {
+  const rappels = computeRappels();
+  const byEmp = {};
+  rappels.forEach(r => {
+    if (!byEmp[r.empId]) byEmp[r.empId] = { empLabel: r.empLabel, items: [] };
+    byEmp[r.empId].items.push(r);
+  });
+
+  const alertCount = rappels.filter(r => r.severity === 'alert').length;
+  const warnCount = rappels.filter(r => r.severity === 'warn').length;
+  const infoCount = rappels.filter(r => r.severity === 'info').length;
+
+  if (rappels.length === 0) {
+    return `
+      <div class="page-head">
+        <div>
+          <div class="uppercase-eyebrow">Conformité</div>
+          <h1 class="h-1">Rappels et échéances</h1>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-body" style="text-align:center;padding:64px 24px;">
+          <div style="font-size:56px;line-height:1;margin-bottom:16px;">✨</div>
+          <h2 class="h-2" style="margin-bottom:8px;">Tout est à jour</h2>
+          <div class="text-mute">Aucune échéance à anticiper sur les 90 prochains jours.</div>
+        </div>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="page-head">
+      <div>
+        <div class="uppercase-eyebrow">Conformité</div>
+        <h1 class="h-1">Rappels et échéances</h1>
+        <div class="text-mute" style="margin-top:6px;font-size:13px;">Anticipation des renouvellements légaux et administratifs</div>
+      </div>
+    </div>
+
+    <div class="kpi-grid" style="grid-template-columns:repeat(3,1fr);">
+      <div class="kpi alert">
+        <div class="kpi-label">Urgent</div>
+        <div class="kpi-value">${alertCount}</div>
+        <div class="kpi-meta">à traiter immédiatement</div>
+      </div>
+      <div class="kpi warn">
+        <div class="kpi-label">À anticiper</div>
+        <div class="kpi-value">${warnCount}</div>
+        <div class="kpi-meta">échéance proche</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-label">À surveiller</div>
+        <div class="kpi-value">${infoCount}</div>
+        <div class="kpi-meta">informationnel</div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><h3>Échéances triées par urgence</h3></div>
+      <div class="panel-body nopad">
+        ${rappels.map(r => `
+          <div class="rappel-row sev-${r.severity}">
+            <div class="rappel-icon">${RAPPEL_ICONS[r.type] || '⏰'}</div>
+            <div class="rappel-body">
+              <div class="rappel-head">
+                <span class="rappel-emp">${esc(r.empLabel)}</span>
+                <span class="chip ${r.severity==='alert'?'alert':r.severity==='warn'?'warn':''}">${esc(r.label)}</span>
+                ${r.daysLeft >= 0
+                  ? `<span class="text-mute" style="font-size:12px;">${r.daysLeft === 0 ? 'aujourd\'hui' : `dans ${r.daysLeft} j`}</span>`
+                  : `<span style="font-size:12px;color:var(--c-alert-text);font-weight:600;">en retard de ${-r.daysLeft} j</span>`}
+              </div>
+              <div class="rappel-detail">${esc(r.detail)}</div>
+              <div class="rappel-action">→ ${esc(r.action)}</div>
+            </div>
+            <button class="btn-ghost" data-open-emp="${r.empId}" title="Ouvrir la fiche">Fiche →</button>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  `;
+}
+
+function bindRappels() {
+  $$('[data-open-emp]').forEach(b => b.addEventListener('click', ev => {
+    state.empDetail = parseInt(ev.currentTarget.dataset.openEmp);
+    state.empTab = 'contrats';
+    state.page = 'employees';
+    render();
+  }));
+}
+
+// ─────────── ÉMARGEMENTS ───────────
+function countUnsignedEmargements() {
+  // Compte les semaines publiées dont des salariés n'ont pas encore émargé
+  let count = 0;
+  const publishedWeeks = Object.keys(state.publications || {});
+  const actives = state.employees.filter(e => e.statut === 'Actif');
+  publishedWeeks.forEach(wk => {
+    actives.forEach(emp => {
+      const sigKey = `${emp.id}_${wk}`;
+      const hasShifts = [0,1,2,3,4,5,6].some(d => (state.shifts[`${emp.id}_${d}_${wk}`]||[]).length);
+      if (hasShifts && !(state.emargements && state.emargements[sigKey])) {
+        count++;
+      }
+    });
+  });
+  return count;
+}
+
+function pageEmargements() {
+  const publishedWeeks = Object.keys(state.publications || {})
+    .sort((a, b) => b.localeCompare(a))
+    .slice(0, 12);
+
+  const actives = state.employees.filter(e => e.statut === 'Actif');
+
+  return `
+    <div class="page-head">
+      <div>
+        <div class="uppercase-eyebrow">Conformité légale</div>
+        <h1 class="h-1">Émargements des plannings</h1>
+        <div class="text-mute" style="margin-top:6px;font-size:13px;">Signature électronique horodatée des plannings publiés — conforme au décompte horaire (article L3171-2 du Code du travail)</div>
+      </div>
+    </div>
+
+    <div class="panel" style="background:var(--c-paper);border:1px solid var(--c-line);margin-bottom:18px;">
+      <div class="panel-body" style="padding:16px 22px;">
+        <div style="display:flex;align-items:flex-start;gap:14px;">
+          <div style="font-size:24px;line-height:1;">ℹ️</div>
+          <div style="flex:1;font-size:13px;color:var(--c-ink-3);line-height:1.55;">
+            <strong>Fonctionnement de l'émargement</strong><br>
+            Chaque salarié émarge son planning hebdomadaire depuis son interface mobile une fois qu'il a pris connaissance des horaires. L'émargement est horodaté et conservé. En cas de contrôle URSSAF ou Inspection du travail, ces signatures prouvent que les horaires ont été portés à la connaissance du salarié.
+          </div>
+        </div>
+      </div>
+    </div>
+
+    ${publishedWeeks.length === 0 ? `
+      <div class="panel"><div class="panel-body" style="text-align:center;padding:48px 24px;">
+        <div class="text-mute">Aucun planning publié pour le moment.</div>
+      </div></div>
+    ` : `
+      <div class="panel">
+        <div class="panel-head"><h3>Suivi sur les 12 dernières semaines publiées</h3></div>
+        <div class="panel-body nopad" style="overflow-x:auto;">
+          <table class="tbl tbl-compact">
+            <thead>
+              <tr>
+                <th>Semaine</th>
+                <th>Publication</th>
+                ${actives.map(e => `<th style="text-align:center;font-size:10.5px;">${esc(e.prenom)}</th>`).join('')}
+                <th>État</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${publishedWeeks.map(wk => {
+                const pub = state.publications[wk];
+                const wkDate = new Date(wk + 'T00:00:00');
+                const wkEnd = addDays(wkDate, 6);
+                let signed = 0, expected = 0;
+                const cells = actives.map(emp => {
+                  const hasShifts = [0,1,2,3,4,5,6].some(d => (state.shifts[`${emp.id}_${d}_${wk}`]||[]).length);
+                  if (!hasShifts) return `<td style="text-align:center;color:var(--c-ink-5);">—</td>`;
+                  expected++;
+                  const sig = state.emargements && state.emargements[`${emp.id}_${wk}`];
+                  if (sig) {
+                    signed++;
+                    const sigDate = new Date(sig.signedAt);
+                    return `<td style="text-align:center;color:var(--c-good-dark);" title="Signé le ${sigDate.toLocaleString('fr-FR')}">✓</td>`;
+                  } else {
+                    return `<td style="text-align:center;color:var(--c-warn-dark);" title="En attente">○</td>`;
+                  }
+                }).join('');
+                const allSigned = expected > 0 && signed === expected;
+                return `
+                  <tr>
+                    <td><strong>${fmtDateShort(wkDate)}</strong><br><span class="text-mute" style="font-size:11px;">au ${fmtDateShort(wkEnd)}</span></td>
+                    <td class="text-mute" style="font-size:11.5px;">${new Date(pub.publishedAt).toLocaleDateString('fr-FR',{day:'numeric',month:'short'})}</td>
+                    ${cells}
+                    <td>${allSigned
+                      ? `<span class="chip good">✓ Complet</span>`
+                      : `<span class="chip ${expected > 0 ? 'warn' : ''}">${signed}/${expected}</span>`}</td>
+                  </tr>
+                `;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `}
+
+    <div style="margin-top:14px;font-size:12px;color:var(--c-ink-4);">
+      Légende : <span style="color:var(--c-good-dark);">✓ signé</span> · <span style="color:var(--c-warn-dark);">○ en attente</span> · — pas de shift cette semaine
+    </div>
+  `;
+}
+
+// ─────────── PAGE ÉTABLISSEMENT — DUERP, Affichages, HACCP, CSE ───────────
+const AFFICHAGES_OBLIGATOIRES = [
+  { key: 'conv_hcr',       label: 'Convention collective HCR (IDCC 1979)', detail: 'Disponible en consultation' },
+  { key: 'horaires',       label: 'Horaires collectifs de travail',         detail: 'Plage d\'ouverture et de fermeture' },
+  { key: 'medecine',       label: 'Médecine du travail',                    detail: 'Coordonnées du service de santé' },
+  { key: 'inspection',     label: 'Inspection du travail',                  detail: 'Coordonnées DDETS de Paris' },
+  { key: 'urgence',        label: 'Numéros d\'urgence',                     detail: '15, 17, 18, 112, 114, 119' },
+  { key: 'harcelement',    label: 'Lutte contre le harcèlement',            detail: 'Sexuel + moral · référents internes' },
+  { key: 'discrimination', label: 'Lutte contre les discriminations',       detail: 'Article 225-1 du Code pénal' },
+  { key: 'egalite',        label: 'Égalité professionnelle H/F',             detail: 'Index égalité (≥ 50 salariés)' },
+  { key: 'reglement',      label: 'Règlement intérieur',                    detail: 'Obligatoire si ≥ 50 salariés' },
+  { key: 'duerp_dispo',    label: 'Modalités d\'accès au DUERP',            detail: 'Information aux salariés' },
+  { key: 'fumeur',         label: 'Interdiction de fumer',                  detail: 'Vaper interdit aussi' },
+  { key: 'cse_election',   label: 'Élection CSE',                            detail: 'Obligatoire si ≥ 11 salariés depuis 12 mois' },
+];
+
+function pageEtablissement() {
+  const actives = state.employees.filter(e => e.statut === 'Actif');
+  const haccpTeam = actives.filter(e => normEmp(e).certifHACCP);
+  const haccpOK = haccpTeam.length >= 1;
+  const cseSeuil = actives.length >= 11;
+  const duerp = state.duerp || null;
+  const today = new Date();
+  const duerpEcheance = duerp && duerp.updatedAt ? (() => {
+    const d = new Date(duerp.updatedAt);
+    d.setFullYear(d.getFullYear() + 1);
+    return d;
+  })() : null;
+  const duerpOK = duerp && duerpEcheance && duerpEcheance >= today;
+  const affichagesCount = Object.values(state.affichages || {}).filter(a => a && a.present).length;
+
+  return `
+    <div class="page-head">
+      <div>
+        <div class="uppercase-eyebrow">Conformité</div>
+        <h1 class="h-1">Établissement</h1>
+        <div class="text-mute" style="margin-top:6px;font-size:13px;">Obligations légales et documents au niveau du restaurant (pas par salarié)</div>
+      </div>
+    </div>
+
+    <div class="kpi-grid" style="grid-template-columns:repeat(4,1fr);">
+      <div class="kpi ${duerpOK?'':'alert'}">
+        <div class="kpi-label">DUERP</div>
+        <div class="kpi-value" style="font-size:24px;">${duerpOK ? '✓' : '✗'}</div>
+        <div class="kpi-meta">${duerpOK ? `À renouveler le ${fmtDateShort(dateISO(duerpEcheance))}` : (duerp ? 'EXPIRÉ — à mettre à jour' : 'Non renseigné')}</div>
+      </div>
+      <div class="kpi ${haccpOK?'':'warn'}">
+        <div class="kpi-label">Personnes HACCP</div>
+        <div class="kpi-value">${haccpTeam.length}</div>
+        <div class="kpi-meta">${haccpOK ? haccpTeam.map(e => e.prenom).join(', ') : 'Au moins 1 obligatoire'}</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-label">Affichages OK</div>
+        <div class="kpi-value">${affichagesCount}<span style="font-size:18px;color:var(--c-ink-4);"> / ${AFFICHAGES_OBLIGATOIRES.length}</span></div>
+        <div class="kpi-meta">Vérification annuelle conseillée</div>
+      </div>
+      <div class="kpi ${cseSeuil?'warn':''}">
+        <div class="kpi-label">Seuil CSE</div>
+        <div class="kpi-value">${actives.length}</div>
+        <div class="kpi-meta">${cseSeuil ? '≥ 11 → CSE obligatoire' : 'Sous le seuil (11)'}</div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">
+        <h3>Document Unique d'Évaluation des Risques (DUERP)</h3>
+        <button class="btn-sec" id="updateDuerp">${duerp ? 'Marquer comme à jour' : 'Renseigner'}</button>
+      </div>
+      <div class="panel-body">
+        <div style="font-size:13px;color:var(--c-ink-3);line-height:1.55;margin-bottom:14px;">
+          Le DUERP est obligatoire dès le 1ᵉʳ salarié (article R4121-1). Il doit lister les risques professionnels identifiés au restaurant : <strong>coupures, brûlures, chutes, TMS, agression, allergènes, charge de travail</strong>. Mise à jour <strong>annuelle obligatoire</strong> et à chaque changement notable. À conserver 40 ans.
+        </div>
+        ${duerp ? `
+          ${kvRow('Dernière mise à jour', fmtDateShort(duerp.updatedAt))}
+          ${kvRow('Prochaine échéance', `<span class="chip ${duerpOK?'good':'alert'}">${fmtDateShort(dateISO(duerpEcheance))}</span>`)}
+          ${duerp.note ? kvRow('Note', esc(duerp.note)) : ''}
+        ` : `<div class="text-mute" style="text-align:center;padding:16px 0;">Aucun DUERP enregistré</div>`}
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top:14px;">
+      <div class="panel-head">
+        <h3>Affichages obligatoires</h3>
+        <span class="text-mute" style="font-size:11.5px;">À cocher après vérification physique au restaurant</span>
+      </div>
+      <div class="panel-body nopad">
+        <table class="tbl">
+          <thead><tr><th>Affichage</th><th>Détail</th><th>Présent</th><th>Vérifié le</th></tr></thead>
+          <tbody>
+            ${AFFICHAGES_OBLIGATOIRES.map(aff => {
+              const state_aff = (state.affichages || {})[aff.key];
+              const present = state_aff && state_aff.present;
+              return `
+                <tr>
+                  <td><strong>${esc(aff.label)}</strong></td>
+                  <td class="text-mute" style="font-size:12px;">${esc(aff.detail)}</td>
+                  <td><label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+                    <input type="checkbox" data-aff="${aff.key}" ${present?'checked':''}>
+                    <span class="chip ${present?'good':''}">${present?'✓ Présent':'À afficher'}</span>
+                  </label></td>
+                  <td class="text-mute mono" style="font-size:11.5px;">${state_aff?.updatedAt ? fmtDateShort(state_aff.updatedAt) : '—'}</td>
+                </tr>
+              `;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top:14px;">
+      <div class="panel-head"><h3>Équipe titulaire de la formation HACCP</h3></div>
+      <div class="panel-body">
+        <div style="font-size:13px;color:var(--c-ink-3);line-height:1.55;margin-bottom:14px;">
+          Obligation depuis le décret n°2011-731 : <strong>au moins une personne</strong> de l'établissement doit avoir suivi une formation HACCP de 14h minimum (sauf si diplôme équivalent). En cas de contrôle DDPP (ex-DDPP), c'est vérifié systématiquement.
+        </div>
+        ${haccpTeam.length === 0 ? `
+          <div class="info-banner" style="background:var(--c-alert-bg);border-left:3px solid var(--c-alert-text);padding:12px 14px;border-radius:8px;color:var(--c-alert-dark);">
+            ⚠️ Aucun salarié n'est marqué comme titulaire HACCP. <strong>Obligation légale non respectée.</strong> Inscris au moins une personne en formation (~250€, organismes type CCI, AFPA, CNFCE).
+          </div>
+        ` : `
+          <table class="tbl">
+            <thead><tr><th>Salarié</th><th>Date formation</th></tr></thead>
+            <tbody>
+              ${haccpTeam.map(e => {
+                const n = normEmp(e);
+                return `
+                  <tr>
+                    <td><strong>${esc(e.prenom)} ${esc(e.nom)}</strong> — ${esc(e.poste||'—')}</td>
+                    <td>${n.certifHACCPDate ? fmtDateShort(n.certifHACCPDate) : 'Non renseigné'}</td>
+                  </tr>
+                `;
+              }).join('')}
+            </tbody>
+          </table>
+        `}
+      </div>
+    </div>
+
+    ${cseSeuil ? `
+      <div class="panel" style="margin-top:14px;">
+        <div class="panel-head"><h3>Comité Social et Économique (CSE)</h3></div>
+        <div class="panel-body">
+          <div class="info-banner" style="background:var(--c-warn-bg);border-left:3px solid var(--c-warn-text);padding:14px 16px;border-radius:8px;color:var(--c-warn-dark);font-size:13px;line-height:1.6;">
+            ⚠️ <strong>Tu as atteint le seuil de 11 salariés.</strong> Si cet effectif est maintenu pendant 12 mois consécutifs, l'élection d'un CSE devient obligatoire (article L2311-2). Tu dois :
+            <ul style="margin:10px 0 0 18px;">
+              <li>Informer les salariés de l'organisation des élections (LR + affichage)</li>
+              <li>Inviter les organisations syndicales représentatives</li>
+              <li>Organiser les élections dans les 90 jours</li>
+              <li>Mettre en place le CSE et tenir au moins une réunion mensuelle</li>
+            </ul>
+            <div style="margin-top:10px;">Sanction si défaut : délit d'entrave puni d'un an de prison et 7500 € d'amende, plus dommages-intérêts au syndicat.</div>
+          </div>
+        </div>
+      </div>
+    ` : ''}
+
+    <div class="panel" style="margin-top:14px;background:var(--c-paper);">
+      <div class="panel-head"><h3>Notifications push & WhatsApp aux salariés</h3></div>
+      <div class="panel-body">
+        <div style="font-size:13px;color:var(--c-ink-3);line-height:1.55;">
+          Les notifications push web nécessitent un backend dédié (Firebase Cloud Messaging + Service Worker) et une infrastructure d'envoi. Trois approches possibles :
+          <ul style="margin:10px 0 0 18px;">
+            <li><strong>FCM via Firebase Cloud Functions</strong> (gratuit jusqu'à 125k invocations/mois, après cela ~0,40€/M). Nécessite passage au plan Blaze.</li>
+            <li><strong>WhatsApp Business API</strong> via Twilio ou Vonage : ~0,05€ par message envoyé. Setup en ~2 jours.</li>
+            <li><strong>SMS basique</strong> via Twilio/OVH : ~0,06€ par SMS. Le plus fiable mais coût plus élevé sur la durée.</li>
+          </ul>
+          <div style="margin-top:10px;">Pour le moment l'app est en mode <strong>pull</strong> : le salarié doit ouvrir l'app pour voir son planning. C'est suffisant si tu publies à heure régulière (le dimanche soir par ex.) et que les salariés savent quand consulter.</div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function bindEtablissement() {
+  $('#updateDuerp')?.addEventListener('click', () => openDuerpEditor());
+  $$('[data-aff]').forEach(cb => cb.addEventListener('change', ev => {
+    const key = ev.currentTarget.dataset.aff;
+    const present = ev.currentTarget.checked;
+    state.affichages = state.affichages || {};
+    state.affichages[key] = { present, updatedAt: new Date().toISOString() };
+    if (db) db.ref(`affichages/${key}`).set(state.affichages[key]);
+    toast(present ? 'Affichage marqué présent' : 'Affichage retiré', '');
+  }));
+}
+
+function openDuerpEditor() {
+  const current = state.duerp || {};
+  const todayISO = dateISO(new Date());
+  const body = `
+    <div style="font-size:13px;color:var(--c-ink-3);line-height:1.55;margin-bottom:18px;">
+      Marque ici la mise à jour annuelle du DUERP. Le document physique (ou PDF) doit être conservé séparément et présenté à tout salarié, à l'Inspection du travail, à la médecine du travail.
+    </div>
+    <div class="form-grid">
+      <div class="field full"><label class="field-label">Date de mise à jour</label><input class="input" id="duerpDate" type="date" value="${current.updatedAt ? current.updatedAt.slice(0,10) : todayISO}"></div>
+      <div class="field full"><label class="field-label">Note interne (optionnel)</label><textarea class="input" id="duerpNote" rows="3" placeholder="ex : ajout du risque allergènes, mise à jour TMS cuisine...">${esc(current.note||'')}</textarea></div>
+    </div>
+  `;
+  const footer = `<button class="btn-sec" data-close>Annuler</button><button class="btn-pri" id="duerpSave" style="width:auto;">Enregistrer</button>`;
+  const { close } = openModal({ title: 'Mise à jour DUERP', body, footer });
+  $('#duerpSave').addEventListener('click', () => {
+    const updated = {
+      updatedAt: new Date($('#duerpDate').value + 'T00:00:00').toISOString(),
+      note: $('#duerpNote').value.trim(),
+    };
+    state.duerp = updated;
+    if (db) db.ref('duerp').set(updated);
+    toast('DUERP mis à jour', 'good');
+    close();
+    render();
+  });
+}
+
+
+
+// ─────────── PACK SORTIE — STC + Certif + Attestation France Travail ───────────
+function openPackSortie(empId) {
+  const emp = state.employees.find(e => e.id === empId);
+  if (!emp) return;
+  const n = normEmp(emp);
+
+  const today = new Date();
+  const todayISO = dateISO(today);
+
+  const body = `
+    <div class="text-mute" style="font-size:13px;line-height:1.55;margin-bottom:20px;">
+      Génère les 3 documents légaux obligatoires à remettre au salarié à sa sortie :
+      <strong>certificat de travail</strong>, <strong>solde de tout compte</strong>, et <strong>attestation France Travail</strong> (ex Pôle Emploi).
+    </div>
+
+    <div class="form-grid">
+      <div class="field full">
+        <label class="field-label">Salarié</label>
+        <input class="input" value="${esc(emp.prenom)} ${esc(emp.nom)}" readonly>
+      </div>
+      <div class="field">
+        <label class="field-label">Date de sortie</label>
+        <input class="input" id="psDateSortie" type="date" value="${n.dateSortie || todayISO}">
+      </div>
+      <div class="field">
+        <label class="field-label">Motif de sortie</label>
+        <select class="input" id="psMotif">
+          <option ${n.motifSortie==='Démission'?'selected':''}>Démission</option>
+          <option ${n.motifSortie==='Fin de CDD'?'selected':''}>Fin de CDD</option>
+          <option ${n.motifSortie==='Rupture conventionnelle'?'selected':''}>Rupture conventionnelle</option>
+          <option ${n.motifSortie==='Licenciement'?'selected':''}>Licenciement</option>
+          <option ${n.motifSortie==='Fin de période d\'essai'?'selected':''}>Fin de période d'essai</option>
+          <option ${n.motifSortie==='Retraite'?'selected':''}>Retraite</option>
+          <option ${n.motifSortie==='Décès'?'selected':''}>Décès</option>
+        </select>
+      </div>
+      <div class="field">
+        <label class="field-label">Solde CP restant à payer (j)</label>
+        <input class="input mono" id="psSoldeCp" type="number" step="0.5" value="${(n.cpAcquisN - n.cpPrisN + n.cpAcquisNm1 - n.cpPrisNm1).toFixed(1)}">
+      </div>
+      <div class="field">
+        <label class="field-label">Indemnité de précarité (€)</label>
+        <input class="input mono" id="psPrecarite" type="number" step="0.01" value="0" placeholder="0.00">
+        <div class="text-mute" style="font-size:11px;margin-top:4px;">10% du brut total pour CDD non transformé en CDI</div>
+      </div>
+      <div class="field">
+        <label class="field-label">Indemnité légale licenciement (€)</label>
+        <input class="input mono" id="psIndemLic" type="number" step="0.01" value="0">
+      </div>
+      <div class="field full">
+        <label class="field-label">Documents à générer</label>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;"><input type="checkbox" id="psDocCertif" checked> Certificat de travail</label>
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;"><input type="checkbox" id="psDocStc" checked> Reçu solde tout compte</label>
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;"><input type="checkbox" id="psDocAttest" checked> Attestation France Travail</label>
+        </div>
+      </div>
+    </div>
+
+    <div class="info-banner" style="margin-top:14px;background:var(--c-warn-bg);border-left:3px solid var(--c-warn-text);padding:12px 14px;border-radius:8px;font-size:12.5px;color:var(--c-warn-text);line-height:1.5;">
+      <strong>Note :</strong> ces documents sont générés en HTML imprimable (Cmd/Ctrl+P pour PDF). L'attestation France Travail officielle doit en plus être faite sur <a href="https://www.net-entreprises.fr" target="_blank" style="color:inherit;">net-entreprises.fr</a> via la DSN événementielle dans les 5 jours.
+    </div>
+  `;
+  const footer = `
+    <button class="btn-sec" data-close>Annuler</button>
+    <button class="btn-pri" id="psGenerate" style="width:auto;">Générer les documents</button>
+  `;
+
+  const { close } = openModal({ title: 'Pack de sortie', body, footer });
+
+  $('#psGenerate').addEventListener('click', () => {
+    const data = {
+      emp,
+      dateSortie: $('#psDateSortie').value,
+      motif: $('#psMotif').value,
+      soldeCp: parseFloat($('#psSoldeCp').value) || 0,
+      precarite: parseFloat($('#psPrecarite').value) || 0,
+      indemLic: parseFloat($('#psIndemLic').value) || 0,
+    };
+    const docs = {
+      certif: $('#psDocCertif').checked,
+      stc: $('#psDocStc').checked,
+      attest: $('#psDocAttest').checked,
+    };
+    // Save sortie info on employee
+    const updated = { ...emp, dateSortie: data.dateSortie, motifSortie: data.motif, statut: 'Inactif' };
+    state.employees = state.employees.map(x => x.id === emp.id ? updated : x);
+    fbSave('employees', state.employees);
+
+    generatePackSortieDocuments(data, docs);
+    close();
+  });
+}
+
+function generatePackSortieDocuments(data, docs) {
+  const { emp, dateSortie, motif, soldeCp, precarite, indemLic } = data;
+  const n = normEmp(emp);
+  const win = window.open('', '_blank');
+  if (!win) { toast('Pop-up bloquée — autorise les pop-ups', 'error'); return; }
+  const dateSortieFmt = new Date(dateSortie).toLocaleDateString('fr-FR', {day:'numeric',month:'long',year:'numeric'});
+  const dateDebutFmt = n.contratDebut ? new Date(n.contratDebut).toLocaleDateString('fr-FR', {day:'numeric',month:'long',year:'numeric'}) : '—';
+  const todayFmt = new Date().toLocaleDateString('fr-FR', {day:'numeric',month:'long',year:'numeric'});
+  const empNom = `${emp.prenom} ${emp.nom}`;
+  const adresseSal = [n.adresse, n.complementAdresse, `${n.codePostal} ${n.ville}`].filter(Boolean).join(', ');
+
+  const css = `
+    body { font-family: Georgia, serif; max-width: 720px; margin: 30px auto; padding: 0 30px; color: #1a1817; line-height: 1.6; }
+    h1 { font-size: 22px; margin: 30px 0 16px; border-bottom: 2px solid #1a1817; padding-bottom: 8px; }
+    h2 { font-size: 16px; margin-top: 20px; }
+    .doc-section { page-break-after: always; padding-bottom: 40px; }
+    .doc-section:last-child { page-break-after: auto; }
+    .header { display: flex; justify-content: space-between; margin-bottom: 24px; }
+    .from { font-size: 12.5px; }
+    .to { text-align: right; font-size: 12.5px; }
+    .signature-line { margin-top: 50px; display: flex; justify-content: space-between; font-size: 12px; }
+    .signature-line .box { width: 240px; }
+    .signature-line .box strong { display: block; margin-bottom: 40px; font-size: 12.5px; }
+    .signature-line .line { border-top: 1px solid #555; margin-top: 30px; padding-top: 6px; }
+    table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 13px; }
+    table th, table td { padding: 8px 10px; border: 1px solid #d0c8b8; text-align: left; }
+    table th { background: #f5f2ea; }
+    table .num { text-align: right; font-family: monospace; }
+    @media print { body { margin: 0; padding: 18mm; } @page { margin: 0; size: A4; } }
+  `;
+
+  let html = `<!doctype html><html><head><meta charset="utf-8"><title>Pack sortie ${empNom}</title><style>${css}</style></head><body>`;
+
+  if (docs.certif) {
+    html += `
+      <div class="doc-section">
+        <div class="header">
+          <div class="from">
+            <strong>SAS Man'ouché</strong><br>
+            ${esc(emp.adresseRestau || '')}<br>
+            SIRET / RCS
+          </div>
+          <div class="to">
+            <strong>${esc(empNom)}</strong><br>
+            ${esc(adresseSal)}
+          </div>
+        </div>
+        <h1>Certificat de travail</h1>
+        <p>Je soussigné, gérant de la société Man'ouché, certifie que <strong>${esc(empNom)}</strong> (né(e) le ${n.dateNaissance ? new Date(n.dateNaissance).toLocaleDateString('fr-FR') : '—'}) a été employé(e) au sein de notre établissement :</p>
+        <ul>
+          <li>en qualité de <strong>${esc(emp.poste || '—')}</strong></li>
+          <li>du <strong>${dateDebutFmt}</strong> au <strong>${dateSortieFmt}</strong> inclus</li>
+          <li>sous contrat de type <strong>${esc(emp.contrat || '—')}</strong></li>
+        </ul>
+        <p>${esc(empNom)} nous quitte ce jour libre de tout engagement.</p>
+        <p>Le présent certificat est délivré pour servir et valoir ce que de droit.</p>
+        <p style="margin-top:24px;">Fait à Paris, le ${todayFmt}.</p>
+        <div class="signature-line">
+          <div class="box"><strong>Signature de l'employeur</strong><div class="line">Pour la direction</div></div>
+        </div>
+      </div>
+    `;
+  }
+
+  if (docs.stc) {
+    const totalDu = soldeCp * (n.taux || 12) * 7 + precarite + indemLic;
+    html += `
+      <div class="doc-section">
+        <div class="header">
+          <div class="from">
+            <strong>SAS Man'ouché</strong><br>
+            SIRET / RCS
+          </div>
+          <div class="to">
+            <strong>${esc(empNom)}</strong><br>
+            ${esc(adresseSal)}
+          </div>
+        </div>
+        <h1>Reçu pour solde de tout compte</h1>
+        <p>Je soussigné(e), <strong>${esc(empNom)}</strong>, reconnais avoir reçu de la société Man'ouché, employeur, à l'occasion de la rupture de mon contrat de travail (motif : ${esc(motif)}) intervenue le <strong>${dateSortieFmt}</strong>, les sommes suivantes pour solde de tout compte :</p>
+        <table>
+          <tr><th>Élément de rémunération</th><th class="num">Montant brut (€)</th></tr>
+          <tr><td>Solde de congés payés (${soldeCp.toFixed(1)} jours)</td><td class="num">${(soldeCp * (n.taux||12) * 7).toFixed(2)}</td></tr>
+          ${precarite > 0 ? `<tr><td>Indemnité de fin de contrat (précarité)</td><td class="num">${precarite.toFixed(2)}</td></tr>` : ''}
+          ${indemLic > 0 ? `<tr><td>Indemnité légale de licenciement</td><td class="num">${indemLic.toFixed(2)}</td></tr>` : ''}
+          <tr><th>TOTAL BRUT</th><th class="num">${totalDu.toFixed(2)}</th></tr>
+        </table>
+        <p style="font-size:12px;font-style:italic;color:#555;">Le présent reçu peut être dénoncé par le salarié dans un délai de <strong>6 mois</strong> à compter de sa signature (article L1234-20 du Code du travail).</p>
+        <p style="margin-top:24px;">Établi en deux exemplaires originaux, à Paris le ${todayFmt}.</p>
+        <div class="signature-line">
+          <div class="box"><strong>Signature du salarié</strong> <span style="font-size:11px;">(précédée de "Lu et approuvé, bon pour solde de tout compte")</span><div class="line"></div></div>
+          <div class="box"><strong>Signature de l'employeur</strong><div class="line"></div></div>
+        </div>
+      </div>
+    `;
+  }
+
+  if (docs.attest) {
+    html += `
+      <div class="doc-section">
+        <h1>Attestation France Travail</h1>
+        <p style="font-size:13px;color:#666;font-style:italic;">Document brouillon — la version officielle doit être déposée sur <strong>net-entreprises.fr</strong> via la DSN événementielle dans les 5 jours suivant la rupture.</p>
+        <h2>Identification du salarié</h2>
+        <p>
+          <strong>${esc(empNom)}</strong><br>
+          Né(e) le ${n.dateNaissance ? new Date(n.dateNaissance).toLocaleDateString('fr-FR') : '—'}<br>
+          ${esc(adresseSal)}<br>
+          Nationalité : ${esc(n.nationalite || '—')}
+        </p>
+        <h2>Identification de l'employeur</h2>
+        <p>
+          <strong>SAS Man'ouché</strong><br>
+          SIRET : à renseigner<br>
+          Code NAF : 5610A (Restauration traditionnelle)<br>
+          Convention collective : HCR (IDCC 1979)
+        </p>
+        <h2>Période d'emploi</h2>
+        <ul>
+          <li>Du <strong>${dateDebutFmt}</strong> au <strong>${dateSortieFmt}</strong></li>
+          <li>Emploi occupé : <strong>${esc(emp.poste || '—')}</strong></li>
+          <li>Type de contrat : <strong>${esc(emp.contrat || '—')}</strong></li>
+          <li>Durée hebdomadaire : <strong>${emp.heures || 35} h</strong></li>
+        </ul>
+        <h2>Motif de la rupture</h2>
+        <p><strong>${esc(motif)}</strong></p>
+        <h2>Salaires des 12 derniers mois (à compléter par le comptable)</h2>
+        <p style="font-size:12px;color:#666;">Cette section sera renseignée depuis la DSN par le cabinet comptable.</p>
+        <p style="margin-top:24px;">Fait à Paris, le ${todayFmt}.</p>
+        <div class="signature-line">
+          <div class="box"><strong>Signature de l'employeur</strong><div class="line"></div></div>
+        </div>
+      </div>
+    `;
+  }
+
+  html += `</body></html>`;
+  win.document.write(html);
+  win.document.close();
+  setTimeout(() => win.print(), 600);
+  toast('Documents prêts — Cmd+P pour imprimer/PDF', 'good', 5000);
+}
+
 function rhEntries() {
   // Entrées : salariés avec contratDebut dans les 90 derniers jours
   const now = new Date();
@@ -3669,10 +4956,41 @@ function bindEmp() {
 
   switch (state.page) {
     case 'home': bindEmpHome(); break;
-    case 'myweek': break;
+    case 'myweek': bindEmpWeek(); break;
     case 'myreqs': bindEmpMyRequests(); break;
     case 'myhours': break;
     case 'profile': break;
+  }
+}
+
+function bindEmpWeek() {
+  $$('[data-week]').forEach(b => b.addEventListener('click', e => {
+    const a = e.currentTarget.dataset.week;
+    if (a === 'prev') state.weekStart = addDays(state.weekStart, -7);
+    else if (a === 'next') state.weekStart = addDays(state.weekStart, 7);
+    else state.weekStart = getMonday(new Date());
+    render();
+  }));
+  const emargerBtn = $('#emargerBtn');
+  if (emargerBtn) {
+    emargerBtn.addEventListener('click', () => {
+      const empId = state.user.empId;
+      const wk = weekKey(state.weekStart);
+      const sigKey = `${empId}_${wk}`;
+      if (!confirm('Tu confirmes avoir pris connaissance de ton planning pour cette semaine ?\n\nCette signature sera horodatée et conservée.')) return;
+      const sig = {
+        signedAt: new Date().toISOString(),
+        userAgent: navigator.userAgent.slice(0, 200),
+        empId, weekKey: wk,
+      };
+      state.emargements = state.emargements || {};
+      state.emargements[sigKey] = sig;
+      if (db) {
+        db.ref(`emargements/${sigKey}`).set(sig);
+      }
+      toast('Planning émargé. Merci !', 'good');
+      render();
+    });
   }
 }
 
@@ -3868,21 +5186,82 @@ function bindEmpHome() {
   if (sigBtn) sigBtn.addEventListener('click', openSignalModal);
 }
 
-function doPunch(kind) {
+// Coordonnées du restaurant Man'ouché (à ajuster). Si null, pas de check géo.
+const RESTO_GPS = {
+  lat: 48.8566,  // Paris fallback — à remplacer par les coords précises du resto
+  lng: 2.3522,
+  radius: 150,   // mètres de tolérance
+  active: false, // mettre true pour activer le check géo
+};
+
+function haversineDistance(lat1, lng1, lat2, lng2) {
+  const R = 6371000;
+  const toRad = x => x * Math.PI / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng/2)**2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+async function getGeoCheck() {
+  if (!RESTO_GPS.active || !navigator.geolocation) return { ok: true, skip: true };
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => resolve({ ok: false, error: 'timeout' }), 8000);
+    navigator.geolocation.getCurrentPosition(
+      pos => {
+        clearTimeout(timeout);
+        const d = haversineDistance(pos.coords.latitude, pos.coords.longitude, RESTO_GPS.lat, RESTO_GPS.lng);
+        resolve({
+          ok: d <= RESTO_GPS.radius,
+          distance: Math.round(d),
+          lat: pos.coords.latitude,
+          lng: pos.coords.longitude,
+        });
+      },
+      err => {
+        clearTimeout(timeout);
+        resolve({ ok: false, error: err.message });
+      },
+      { enableHighAccuracy: true, timeout: 7000, maximumAge: 30000 }
+    );
+  });
+}
+
+async function doPunch(kind) {
   const empId = state.user.empId;
   const now = new Date();
   const iso = dateISO(now);
   const hhmm = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
   const key = `${empId}_${iso}`;
   const punches = state.punches[key] ? [...state.punches[key]] : [];
+
+  // Géolocalisation check
+  let geo = null;
+  if (RESTO_GPS.active) {
+    toast('Vérification de la position...', '', 1500);
+    const check = await getGeoCheck();
+    if (!check.ok && !check.skip) {
+      const msg = check.distance
+        ? `Tu es à ${check.distance}m du restaurant (max ${RESTO_GPS.radius}m). Pointage refusé.`
+        : `Position non disponible. Active la géolocalisation et autorise l'app.`;
+      if (!confirm(msg + '\n\nForcer le pointage quand même ? (sera flaggé pour vérification admin)')) return;
+      geo = { ...check, forced: true };
+    } else {
+      geo = check.skip ? null : check;
+    }
+  }
+
   if (kind === 'in') {
-    punches.push({ in: hhmm });
+    const punch = { in: hhmm };
+    if (geo) punch.geoIn = geo;
+    punches.push(punch);
   } else {
     if (punches.length === 0 || punches[punches.length-1].out) {
       toast('Aucune entrée à clôturer', 'error');
       return;
     }
     punches[punches.length-1].out = hhmm;
+    if (geo) punches[punches.length-1].geoOut = geo;
   }
   state.punches[key] = punches;
   fbSave(`punches/${key}`, punches);
@@ -3995,6 +5374,31 @@ function empWeek() {
         </div>
       </div>
     `}
+
+    ${wkPublished && totalH > 0 ? (() => {
+      const sigKey = `${empId}_${wk}`;
+      const sig = state.emargements && state.emargements[sigKey];
+      if (sig) {
+        return `
+          <div class="emargement-card signed">
+            <div style="font-size:22px;line-height:1;">✓</div>
+            <div style="flex:1;">
+              <div style="font-weight:600;font-size:13.5px;">Planning émargé</div>
+              <div class="text-mute" style="font-size:12px;">Signé le ${new Date(sig.signedAt).toLocaleString('fr-FR',{day:'numeric',month:'long',year:'numeric',hour:'2-digit',minute:'2-digit'})}</div>
+            </div>
+          </div>
+        `;
+      }
+      return `
+        <div class="emargement-card unsigned">
+          <div style="flex:1;">
+            <div style="font-weight:600;font-size:14px;margin-bottom:4px;">Émargement de la semaine</div>
+            <div class="text-mute" style="font-size:12.5px;line-height:1.45;">En cliquant sur "J'émarge", tu confirmes avoir pris connaissance de ton planning pour cette semaine. Cette signature est horodatée et conservée comme preuve légale.</div>
+          </div>
+          <button class="btn-pri" id="emargerBtn" style="width:auto;flex-shrink:0;">J'émarge ✍️</button>
+        </div>
+      `;
+    })() : ''}
   `;
 }
 
