@@ -30,6 +30,34 @@ const DEFAULT_EMPLOYEES = [
 const DAYS = ['Lundi','Mardi','Mercredi','Jeudi','Vendredi','Samedi','Dimanche'];
 const DAYS_SHORT = ['Lun','Mar','Mer','Jeu','Ven','Sam','Dim'];
 
+// Seed planning (template based on the RH_ULTIME schedule) — used by "Charger un planning de démarrage"
+const SEED_SHIFTS = {
+  // Ahmad Yaggi (3)
+  '3_0':[{type:'ar',start:'11:00',end:'23:00',label:'Patron',pauseDuration:120}],
+  '3_1':[{type:'ar',start:'11:00',end:'23:00',label:'Patron',pauseDuration:120}],
+  '3_2':[{type:'ar',start:'11:00',end:'23:00',label:'Patron',pauseDuration:120}],
+  '3_5':[{type:'soir',start:'18:00',end:'23:00'}],
+  // Jeremie (4)
+  '4_0':[{type:'soir',start:'17:00',end:'23:00'}],
+  '4_4':[{type:'ar',start:'11:00',end:'23:59',pauseDuration:120}],
+  '4_5':[{type:'ar',start:'12:00',end:'23:59',pauseDuration:120}],
+  '4_6':[{type:'soir',start:'15:00',end:'23:00'}],
+  // Oussama (5)
+  '5_3':[{type:'ar',start:'11:00',end:'23:00',pauseDuration:120}],
+  '5_4':[{type:'ar',start:'12:00',end:'23:59',pauseDuration:120}],
+  '5_5':[{type:'midi',start:'12:00',end:'18:00'}],
+  '5_6':[{type:'ar',start:'12:00',end:'23:00',pauseDuration:120}],
+  // Yahya / Dababo (6)
+  '6_3':[{type:'ar',start:'12:00',end:'23:00',pauseDuration:120}],
+  '6_4':[{type:'soir',start:'17:00',end:'23:00'}],
+  '6_5':[{type:'ar',start:'11:00',end:'23:59',pauseDuration:120}],
+  '6_6':[{type:'ar',start:'12:00',end:'23:00',pauseDuration:120}],
+  // Omar (7)
+  '7_0':[{type:'midi',start:'12:00',end:'17:00'}],
+  '7_1':[{type:'ar',start:'12:00',end:'23:00',pauseDuration:120}],
+  '7_2':[{type:'ar',start:'12:00',end:'23:00',pauseDuration:120}]
+};
+
 // ─────────── STATE ───────────
 const state = {
   user: null,        // null | {role:'admin'} | {role:'emp', empId, ...}
@@ -654,6 +682,23 @@ function pagePlanning() {
   const wkEnd = addDays(state.weekStart, 6);
   const todayISO = dateISO(new Date());
 
+  // Count shifts for this week to detect empty planning
+  let weekShiftCount = 0;
+  actives.forEach(e => {
+    for (let d = 0; d < 7; d++) {
+      weekShiftCount += (state.shifts[`${e.id}_${d}_${wk}`] || []).length;
+    }
+  });
+
+  // Check if previous week has shifts (to enable "duplicate previous week")
+  const prevWk = weekKey(addDays(state.weekStart, -7));
+  let prevWeekShiftCount = 0;
+  actives.forEach(e => {
+    for (let d = 0; d < 7; d++) {
+      prevWeekShiftCount += (state.shifts[`${e.id}_${d}_${prevWk}`] || []).length;
+    }
+  });
+
   return `
     <div class="page-head">
       <div>
@@ -669,6 +714,18 @@ function pagePlanning() {
         </div>
       </div>
     </div>
+
+    ${weekShiftCount === 0 ? `
+      <div class="panel" style="margin-bottom:14px;background:#fafafa;border-style:dashed;">
+        <div class="panel-body" style="text-align:center;padding:24px 18px;">
+          <div class="serif" style="font-size:22px;letter-spacing:-0.02em;margin-bottom:4px;">Planning vide</div>
+          <div class="text-mute" style="font-size:13px;margin-bottom:16px;">Pour démarrer, charge un planning d'exemple ${prevWeekShiftCount > 0 ? 'ou duplique la semaine précédente' : ''}, ou clique directement sur les cases pour ajouter des shifts.</div>
+          <div class="row" style="justify-content:center;gap:8px;">
+            ${prevWeekShiftCount > 0 ? `<button class="btn-sec" id="seedFromPrev">Dupliquer la semaine précédente</button>` : ''}
+            <button class="btn-pri" id="seedDefault" style="width:auto;padding:10px 18px;">Charger un planning d'exemple</button>
+          </div>
+        </div>
+      </div>` : ''}
 
     <div class="panel">
       <div class="panel-body nopad">
@@ -687,7 +744,13 @@ function pagePlanning() {
               ${[0,1,2,3,4,5,6].map(d => {
                 const shifts = state.shifts[`${e.id}_${d}_${wk}`] || [];
                 return `<div class="plan-cell cell ${shifts.length?'has':''}" data-edit="${e.id}_${d}">
-                  ${shifts.map(s => `<div class="shift ${s.type}"><span class="t">${s.start}–${s.end}</span><span class="l">${esc(s.label || (s.type==='midi'?'Midi':s.type==='soir'?'Soir':'Journée'))}</span></div>`).join('')}
+                  ${shifts.map(s => {
+                    if (s.absent) return `<div class="shift absent">Absent</div>`;
+                    if (s.conge) return `<div class="shift conge">Congé</div>`;
+                    const dur = Math.round(shiftHours(s) * 60);
+                    const pauseStr = s.pauseDuration ? `<span class="pause">☕ ${s.pauseDuration}mn${s.pauseStart?` (${s.pauseStart}–${s.pauseEnd})`:''}</span>` : '';
+                    return `<div class="shift ${s.type}"><span class="l">${esc(s.label || (s.type==='midi'?'Ouverture':s.type==='soir'?'Fermeture':'Aller/Retour'))}</span><span class="t">${s.start}–${s.end}</span><span class="dur">${dur}mn</span>${pauseStr}</div>`;
+                  }).join('')}
                 </div>`;
               }).join('')}
             `).join('')}
@@ -714,6 +777,66 @@ function bindPlanning() {
     const [empId, dayIdx] = e.currentTarget.dataset.edit.split('_').map(Number);
     openShiftEditor(empId, dayIdx);
   }));
+
+  const seedBtn = $('#seedDefault');
+  if (seedBtn) seedBtn.addEventListener('click', () => seedPlanningFromTemplate());
+
+  const dupBtn = $('#seedFromPrev');
+  if (dupBtn) dupBtn.addEventListener('click', () => duplicatePreviousWeek());
+}
+
+function seedPlanningFromTemplate() {
+  const wk = weekKey(state.weekStart);
+  const updates = {};
+  let count = 0;
+  Object.entries(SEED_SHIFTS).forEach(([k, v]) => {
+    const [empId, dayIdx] = k.split('_');
+    // Only seed for employees that exist and are active
+    const emp = state.employees.find(e => String(e.id) === empId && e.statut === 'Actif');
+    if (!emp) return;
+    const newKey = `${empId}_${dayIdx}_${wk}`;
+    state.shifts[newKey] = v;
+    updates[newKey] = v;
+    count++;
+  });
+  if (db) {
+    db.ref('shifts').update(updates).then(() => {
+      toast(`${count} shifts chargés pour cette semaine`, 'good');
+    }).catch(e => {
+      console.error(e); toast('Erreur de sauvegarde', 'error');
+    });
+  } else {
+    toast(`${count} shifts chargés (local)`, 'good');
+  }
+  render();
+}
+
+function duplicatePreviousWeek() {
+  const prevWk = weekKey(addDays(state.weekStart, -7));
+  const curWk = weekKey(state.weekStart);
+  const updates = {};
+  let count = 0;
+  state.employees.forEach(emp => {
+    for (let d = 0; d < 7; d++) {
+      const prevShifts = state.shifts[`${emp.id}_${d}_${prevWk}`];
+      if (prevShifts && prevShifts.length) {
+        const newKey = `${emp.id}_${d}_${curWk}`;
+        state.shifts[newKey] = JSON.parse(JSON.stringify(prevShifts));
+        updates[newKey] = state.shifts[newKey];
+        count++;
+      }
+    }
+  });
+  if (db) {
+    db.ref('shifts').update(updates).then(() => {
+      toast(`${count} shifts dupliqués depuis la semaine précédente`, 'good');
+    }).catch(e => {
+      console.error(e); toast('Erreur de sauvegarde', 'error');
+    });
+  } else {
+    toast(`${count} shifts dupliqués (local)`, 'good');
+  }
+  render();
 }
 
 function openShiftEditor(empId, dayIdx) {
