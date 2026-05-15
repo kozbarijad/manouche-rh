@@ -29,6 +29,27 @@ const DEFAULT_EMPLOYEES = [
 
 const DAYS = ['Lundi','Mardi','Mercredi','Jeudi','Vendredi','Samedi','Dimanche'];
 const DAYS_SHORT = ['Lun','Mar','Mer','Jeu','Ven','Sam','Dim'];
+const MONTHS_FR = ['janvier','février','mars','avril','mai','juin','juillet','août','septembre','octobre','novembre','décembre'];
+
+// Leave types (mutually exclusive with regular shift)
+const LEAVE_TYPES = {
+  cp:                 { label: 'Congé payé',         short: 'CP',         color: 'leave-cp' },
+  absent_justifie:    { label: 'Absent justifié',    short: 'Abs. just.', color: 'leave-justifie' },
+  absent_injustifie:  { label: 'Absent injustifié',  short: 'Abs. inj.',  color: 'leave-injustifie' },
+  arret_maladie:      { label: 'Arrêt maladie',      short: 'AM',         color: 'leave-am' },
+  rtt:                { label: 'RTT',                short: 'RTT',        color: 'leave-rtt' },
+  recup:              { label: 'Récupération',       short: 'Récup',      color: 'leave-recup' },
+};
+
+// Normalize a shift — converts legacy {absent:true} / {conge:true} to new leaveType
+function normShift(s) {
+  if (!s) return s;
+  if (s.leaveType) return s;
+  if (s.absent) return { ...s, leaveType: 'absent_justifie' };
+  if (s.conge) return { ...s, leaveType: 'cp' };
+  return s;
+}
+function isLeave(s) { return !!(s && (s.leaveType || s.absent || s.conge)); }
 
 // Seed planning (template based on the RH_ULTIME schedule) — used by "Charger un planning de démarrage"
 const SEED_SHIFTS = {
@@ -64,10 +85,13 @@ const state = {
   employees: [],
   shifts: {},        // key `${empId}_${dayIdx}_${weekKey}` → [{type,start,end,...}]
   punches: {},       // key `${empId}_${dateISO}` → [{in:'08:32',out:'14:15',meta?}]
+  publications: {},  // key weekKey → {publishedAt, by, note}
   weekStart: getMonday(new Date()),
   fbReady: false,
   page: null,        // current page id
-  loading: true
+  loading: true,
+  monthView: false,  // toggle between week/month view in planning
+  monthAnchor: new Date(),
 };
 
 // ─────────── UTILS ───────────
@@ -102,6 +126,7 @@ function timeToMin(t) { if (!t) return 0; const [h,m] = t.split(':').map(Number)
 function minToTime(m) { return `${pad(Math.floor(m/60))}:${pad(m%60)}`; }
 function shiftHours(sh) {
   if (!sh) return 0;
+  if (isLeave(sh)) return 0;
   let dur = timeToMin(sh.end) - timeToMin(sh.start);
   if (dur < 0) dur += 24*60;
   if (sh.pauseDuration) dur -= sh.pauseDuration;
@@ -165,17 +190,15 @@ async function initFirebase() {
 
 function fbListen() {
   if (!db) return;
-  ['employees','shifts','punches'].forEach(k => {
+  ['employees','shifts','punches','publications'].forEach(k => {
     db.ref(k).on('value', snap => {
       const v = snap.val();
       if (k === 'employees' && v) {
-        // Merge with defaults to preserve username/code if missing in DB
         if (Array.isArray(v)) {
           state.employees = v.filter(Boolean);
         } else {
           state.employees = Object.values(v).filter(Boolean);
         }
-        // Ensure required fields
         state.employees.forEach(e => {
           if (!e.username) e.username = (e.prenom || '').toLowerCase();
           if (!e.code) e.code = '1234';
@@ -188,6 +211,10 @@ function fbListen() {
         console.log('[fb] shifts loaded:', Object.keys(state.shifts).length);
       }
       if (k === 'punches' && v) state.punches = v;
+      if (k === 'publications' && v) {
+        state.publications = v;
+        console.log('[fb] publications loaded:', Object.keys(state.publications).length);
+      }
       render();
     }, err => {
       console.error('[fb] read error on', k, err);
@@ -480,6 +507,14 @@ function viewAdminShell() {
           <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
           Planning
         </button>
+        <button class="nav-item ${state.page==='month'?'active':''}" data-page="month">
+          <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M3 10h18M8 14h.01M12 14h.01M16 14h.01M8 18h.01M12 18h.01M16 18h.01"/></svg>
+          Vue mois
+        </button>
+        <button class="nav-item ${state.page==='hours'?'active':''}" data-page="hours">
+          <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 2v20M2 12h20"/><circle cx="12" cy="12" r="9"/></svg>
+          Heures
+        </button>
         <button class="nav-item ${state.page==='pointages'?'active':''}" data-page="pointages">
           <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
           Pointages
@@ -518,6 +553,8 @@ function viewAdminShell() {
           <select id="mobNav">
             <option value="dashboard" ${state.page==='dashboard'?'selected':''}>Tableau de bord</option>
             <option value="planning" ${state.page==='planning'?'selected':''}>Planning</option>
+            <option value="month" ${state.page==='month'?'selected':''}>Vue mois</option>
+            <option value="hours" ${state.page==='hours'?'selected':''}>Heures</option>
             <option value="pointages" ${state.page==='pointages'?'selected':''}>Pointages</option>
             <option value="alerts" ${state.page==='alerts'?'selected':''}>Alertes${anomalies.length?` (${anomalies.length})`:''}</option>
             <option value="employees" ${state.page==='employees'?'selected':''}>Salariés</option>
@@ -538,6 +575,8 @@ function renderAdminPage() {
   switch (state.page) {
     case 'dashboard': return pageDashboard();
     case 'planning': return pagePlanning();
+    case 'month': return pageMonth();
+    case 'hours': return pageHours();
     case 'pointages': return pagePointages();
     case 'alerts': return pageAlerts();
     case 'employees': return pageEmployees();
@@ -558,6 +597,8 @@ function bindAdmin() {
   switch (state.page) {
     case 'dashboard': bindDashboard(); break;
     case 'planning': bindPlanning(); break;
+    case 'month': bindMonth(); break;
+    case 'hours': bindHours(); break;
     case 'pointages': bindPointages(); break;
     case 'alerts': bindAlerts(); break;
     case 'employees': bindEmployees(); break;
@@ -682,7 +723,6 @@ function pagePlanning() {
   const wkEnd = addDays(state.weekStart, 6);
   const todayISO = dateISO(new Date());
 
-  // Count shifts for this week to detect empty planning
   let weekShiftCount = 0;
   actives.forEach(e => {
     for (let d = 0; d < 7; d++) {
@@ -690,7 +730,6 @@ function pagePlanning() {
     }
   });
 
-  // Check if previous week has shifts (to enable "duplicate previous week")
   const prevWk = weekKey(addDays(state.weekStart, -7));
   let prevWeekShiftCount = 0;
   actives.forEach(e => {
@@ -699,31 +738,55 @@ function pagePlanning() {
     }
   });
 
+  const pub = state.publications[wk];
+  const isPublished = !!pub;
+
+  // Total heures planifiées
+  let totalH = 0;
+  actives.forEach(e => {
+    for (let d = 0; d < 7; d++) {
+      const shifts = state.shifts[`${e.id}_${d}_${wk}`] || [];
+      shifts.forEach(s => totalH += shiftHours(s));
+    }
+  });
+
   return `
     <div class="page-head">
       <div>
-        <div class="uppercase-eyebrow">Planning</div>
+        <div class="uppercase-eyebrow">Planning hebdomadaire</div>
         <h1 class="h-1">${fmtRange(state.weekStart, wkEnd)}</h1>
+        <div class="row" style="gap:8px;margin-top:6px;">
+          <span class="chip">${Math.round(totalH)} h planifiées</span>
+          ${isPublished
+            ? `<span class="chip good">✓ Publié ${new Date(pub.publishedAt).toLocaleDateString('fr-FR',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})}</span>`
+            : `<span class="chip warn">Non publié</span>`}
+        </div>
       </div>
       <div class="page-actions">
         <div class="week-nav">
           <button class="btn-icon" data-week="prev">←</button>
           <span class="week-label">Semaine du ${pad(state.weekStart.getDate())}/${pad(state.weekStart.getMonth()+1)}</span>
           <button class="btn-icon" data-week="next">→</button>
-          <button class="btn-sec" data-week="today">Cette semaine</button>
+          <button class="btn-sec" data-week="today">Aujourd'hui</button>
         </div>
       </div>
+    </div>
+
+    <div class="row" style="gap:8px;margin-bottom:14px;flex-wrap:wrap;">
+      <button class="btn-sec" id="dupFromPrev" ${prevWeekShiftCount > 0 ? '' : 'disabled style="opacity:.4;"'}>↺ Dupliquer la semaine précédente</button>
+      <button class="btn-sec" id="clearWeek" ${weekShiftCount > 0 ? '' : 'disabled style="opacity:.4;"'}>🗑 Vider la semaine</button>
+      <div class="spacer"></div>
+      <button class="btn-pri" id="publishBtn" style="width:auto;padding:9px 16px;">
+        ${isPublished ? '🔄 Republier le planning' : '📢 Publier le planning'}
+      </button>
     </div>
 
     ${weekShiftCount === 0 ? `
       <div class="panel" style="margin-bottom:14px;background:#fafafa;border-style:dashed;">
         <div class="panel-body" style="text-align:center;padding:24px 18px;">
           <div class="serif" style="font-size:22px;letter-spacing:-0.02em;margin-bottom:4px;">Planning vide</div>
-          <div class="text-mute" style="font-size:13px;margin-bottom:16px;">Pour démarrer, charge un planning d'exemple ${prevWeekShiftCount > 0 ? 'ou duplique la semaine précédente' : ''}, ou clique directement sur les cases pour ajouter des shifts.</div>
-          <div class="row" style="justify-content:center;gap:8px;">
-            ${prevWeekShiftCount > 0 ? `<button class="btn-sec" id="seedFromPrev">Dupliquer la semaine précédente</button>` : ''}
-            <button class="btn-pri" id="seedDefault" style="width:auto;padding:10px 18px;">Charger un planning d'exemple</button>
-          </div>
+          <div class="text-mute" style="font-size:13px;margin-bottom:16px;">Clique sur les cases pour ajouter des shifts, ou charge un planning d'exemple pour démarrer rapidement.</div>
+          <button class="btn-pri" id="seedDefault" style="width:auto;padding:10px 18px;">Charger un planning d'exemple</button>
         </div>
       </div>` : ''}
 
@@ -737,32 +800,50 @@ function pagePlanning() {
               const isToday = dateISO(d) === todayISO;
               return `<div class="plan-cell head"><div class="day">${DAYS_SHORT[i]}</div><div class="date ${isToday?'today':''}">${d.getDate()}</div></div>`;
             }).join('')}
-            ${actives.map(e => `
+            ${actives.map(e => {
+              // total heures de la semaine pour cet employé
+              let empWeekH = 0;
+              for (let d = 0; d < 7; d++) {
+                const shifts = state.shifts[`${e.id}_${d}_${wk}`] || [];
+                shifts.forEach(s => empWeekH += shiftHours(s));
+              }
+              const gap = empWeekH - (e.heures || 35);
+              return `
               <div class="plan-cell emp">
-                <div class="row" style="gap:10px;"><div class="av-emp sm">${initials(e)}</div><div><div class="nm">${esc(e.prenom)}</div><div class="ct">${e.heures}h ${e.contrat}</div></div></div>
+                <div class="row" style="gap:10px;align-items:flex-start;">
+                  <div class="av-emp sm">${initials(e)}</div>
+                  <div style="flex:1;min-width:0;">
+                    <div class="nm">${esc(e.prenom)}</div>
+                    <div class="ct">${e.heures}h · <span style="color:${Math.abs(gap)<1?'var(--c-ink-4)':(gap>0?'var(--c-warn)':'var(--c-alert)')};">${empWeekH.toFixed(1)}h</span></div>
+                  </div>
+                </div>
               </div>
               ${[0,1,2,3,4,5,6].map(d => {
-                const shifts = state.shifts[`${e.id}_${d}_${wk}`] || [];
+                const shifts = (state.shifts[`${e.id}_${d}_${wk}`] || []).map(normShift);
                 return `<div class="plan-cell cell ${shifts.length?'has':''}" data-edit="${e.id}_${d}">
-                  ${shifts.map(s => {
-                    if (s.absent) return `<div class="shift absent">Absent</div>`;
-                    if (s.conge) return `<div class="shift conge">Congé</div>`;
-                    const dur = Math.round(shiftHours(s) * 60);
-                    const pauseStr = s.pauseDuration ? `<span class="pause">☕ ${s.pauseDuration}mn${s.pauseStart?` (${s.pauseStart}–${s.pauseEnd})`:''}</span>` : '';
-                    return `<div class="shift ${s.type}"><span class="l">${esc(s.label || (s.type==='midi'?'Ouverture':s.type==='soir'?'Fermeture':'Aller/Retour'))}</span><span class="t">${s.start}–${s.end}</span><span class="dur">${dur}mn</span>${pauseStr}</div>`;
-                  }).join('')}
+                  ${shifts.map(s => renderShiftCell(s)).join('')}
                 </div>`;
               }).join('')}
-            `).join('')}
+            `}).join('')}
           </div>
         </div>
       </div>
     </div>
 
     <div class="row" style="margin-top:12px; color:var(--c-ink-4); font-size:12px;">
-      <span>Astuce :</span><span>cliquez sur une cellule pour ajouter ou modifier un shift.</span>
+      <span>Astuce :</span><span>cliquez sur une cellule pour ajouter ou modifier un shift, ou pour marquer un congé/absence/arrêt maladie.</span>
     </div>
   `;
+}
+
+function renderShiftCell(s) {
+  if (s.leaveType) {
+    const lt = LEAVE_TYPES[s.leaveType] || { short: s.label || 'Absent', color: 'leave-justifie' };
+    return `<div class="shift ${lt.color}">${esc(lt.short)}</div>`;
+  }
+  const dur = Math.round(shiftHours(s) * 60);
+  const pauseStr = s.pauseDuration ? `<span class="pause">☕ ${s.pauseDuration}mn${s.pauseStart?` (${s.pauseStart}–${s.pauseEnd})`:''}</span>` : '';
+  return `<div class="shift ${s.type}"><span class="l">${esc(s.label || (s.type==='midi'?'Ouverture':s.type==='soir'?'Fermeture':'Aller/Retour'))}</span><span class="t">${s.start}–${s.end}</span><span class="dur">${dur}mn</span>${pauseStr}</div>`;
 }
 
 function bindPlanning() {
@@ -781,8 +862,42 @@ function bindPlanning() {
   const seedBtn = $('#seedDefault');
   if (seedBtn) seedBtn.addEventListener('click', () => seedPlanningFromTemplate());
 
-  const dupBtn = $('#seedFromPrev');
+  const dupBtn = $('#dupFromPrev');
   if (dupBtn) dupBtn.addEventListener('click', () => duplicatePreviousWeek());
+
+  const clearBtn = $('#clearWeek');
+  if (clearBtn) clearBtn.addEventListener('click', () => clearCurrentWeek());
+
+  const pubBtn = $('#publishBtn');
+  if (pubBtn) pubBtn.addEventListener('click', () => publishWeek());
+}
+
+function publishWeek() {
+  const wk = weekKey(state.weekStart);
+  const payload = { publishedAt: new Date().toISOString(), by: 'admin' };
+  state.publications[wk] = payload;
+  fbSave(`publications/${wk}`, payload);
+  toast(`Planning publié — les salariés sont notifiés`, 'good');
+  render();
+}
+
+function clearCurrentWeek() {
+  const wk = weekKey(state.weekStart);
+  const actives = state.employees.filter(e => e.statut === 'Actif');
+  if (!confirm(`Vider tout le planning de la semaine du ${state.weekStart.toLocaleDateString('fr-FR')} ?`)) return;
+  const updates = {};
+  actives.forEach(e => {
+    for (let d = 0; d < 7; d++) {
+      const k = `${e.id}_${d}_${wk}`;
+      if (state.shifts[k]) {
+        delete state.shifts[k];
+        updates[k] = null;
+      }
+    }
+  });
+  if (db && Object.keys(updates).length) db.ref('shifts').update(updates).catch(e => console.warn(e));
+  toast('Semaine vidée', '');
+  render();
 }
 
 function seedPlanningFromTemplate() {
@@ -791,7 +906,6 @@ function seedPlanningFromTemplate() {
   let count = 0;
   Object.entries(SEED_SHIFTS).forEach(([k, v]) => {
     const [empId, dayIdx] = k.split('_');
-    // Only seed for employees that exist and are active
     const emp = state.employees.find(e => String(e.id) === empId && e.statut === 'Actif');
     if (!emp) return;
     const newKey = `${empId}_${dayIdx}_${wk}`;
@@ -799,15 +913,8 @@ function seedPlanningFromTemplate() {
     updates[newKey] = v;
     count++;
   });
-  if (db) {
-    db.ref('shifts').update(updates).then(() => {
-      toast(`${count} shifts chargés pour cette semaine`, 'good');
-    }).catch(e => {
-      console.error(e); toast('Erreur de sauvegarde', 'error');
-    });
-  } else {
-    toast(`${count} shifts chargés (local)`, 'good');
-  }
+  if (db) db.ref('shifts').update(updates).catch(e => console.warn(e));
+  toast(`${count} shifts chargés`, 'good');
   render();
 }
 
@@ -827,54 +934,66 @@ function duplicatePreviousWeek() {
       }
     }
   });
-  if (db) {
-    db.ref('shifts').update(updates).then(() => {
-      toast(`${count} shifts dupliqués depuis la semaine précédente`, 'good');
-    }).catch(e => {
-      console.error(e); toast('Erreur de sauvegarde', 'error');
-    });
-  } else {
-    toast(`${count} shifts dupliqués (local)`, 'good');
-  }
+  if (db) db.ref('shifts').update(updates).catch(e => console.warn(e));
+  toast(`${count} shifts dupliqués`, 'good');
   render();
 }
 
 function openShiftEditor(empId, dayIdx) {
   const wk = weekKey(state.weekStart);
   const key = `${empId}_${dayIdx}_${wk}`;
-  const existing = state.shifts[key] || [];
+  const existing = (state.shifts[key] || []).map(normShift);
   const e = state.employees.find(x => x.id === empId);
   const sh = existing[0] || { type: 'soir', start: '17:00', end: '23:00', pauseDuration: 0 };
   const d = addDays(state.weekStart, dayIdx);
+  const currentLeave = sh.leaveType || '';
 
   const body = `
     <div class="uppercase-eyebrow" style="margin-bottom:4px;">${esc(e.prenom)} ${esc(e.nom)}</div>
     <div style="font-family:var(--f-display);font-size:22px;letter-spacing:-0.01em;margin-bottom:18px;">${fmtDateLong(d)}</div>
 
-    <div class="form-grid">
-      <div class="field full">
-        <label class="field-label">Type</label>
-        <div class="tab-switch" id="shType" data-active="${sh.type==='midi'?'0':sh.type==='soir'?'1':'2'}" style="grid-template-columns:1fr 1fr 1fr;">
-          <button data-t="midi" class="${sh.type==='midi'?'active':''}">Midi</button>
-          <button data-t="soir" class="${sh.type==='soir'?'active':''}">Soir</button>
-          <button data-t="ar" class="${sh.type==='ar'?'active':''}">Journée</button>
+    <div class="field full">
+      <label class="field-label">Statut</label>
+      <select class="input" id="shLeaveType">
+        <option value="">— Travaille (shift normal) —</option>
+        ${Object.entries(LEAVE_TYPES).map(([k,v]) => `<option value="${k}" ${currentLeave===k?'selected':''}>${esc(v.label)}</option>`).join('')}
+      </select>
+    </div>
+
+    <div id="shFieldsWrap" ${currentLeave?'style="display:none;"':''}>
+      <div class="form-grid" style="margin-top:14px;">
+        <div class="field full">
+          <label class="field-label">Type de service</label>
+          <div class="tab-switch" id="shType" data-active="${sh.type==='midi'?'0':sh.type==='soir'?'1':'2'}" style="grid-template-columns:1fr 1fr 1fr;">
+            <button type="button" data-t="midi" class="${sh.type==='midi'?'active':''}">Ouverture</button>
+            <button type="button" data-t="soir" class="${sh.type==='soir'?'active':''}">Fermeture</button>
+            <button type="button" data-t="ar" class="${sh.type==='ar'?'active':''}">Aller/Retour</button>
+          </div>
         </div>
-      </div>
-      <div class="field">
-        <label class="field-label">Début</label>
-        <input class="input mono" id="shStart" type="time" value="${sh.start}">
-      </div>
-      <div class="field">
-        <label class="field-label">Fin</label>
-        <input class="input mono" id="shEnd" type="time" value="${sh.end}">
-      </div>
-      <div class="field full">
-        <label class="field-label">Pause (minutes)</label>
-        <input class="input mono" id="shPause" type="number" min="0" step="15" value="${sh.pauseDuration || 0}">
-      </div>
-      <div class="field full">
-        <label class="field-label">Libellé (optionnel)</label>
-        <input class="input" id="shLabel" placeholder="ex: Patron, Renfort..." value="${esc(sh.label || '')}">
+        <div class="field">
+          <label class="field-label">Début</label>
+          <input class="input mono" id="shStart" type="time" value="${sh.start || '17:00'}">
+        </div>
+        <div class="field">
+          <label class="field-label">Fin</label>
+          <input class="input mono" id="shEnd" type="time" value="${sh.end || '23:00'}">
+        </div>
+        <div class="field">
+          <label class="field-label">Pause (mn)</label>
+          <input class="input mono" id="shPauseDur" type="number" min="0" step="15" value="${sh.pauseDuration || 0}">
+        </div>
+        <div class="field">
+          <label class="field-label">Pause début</label>
+          <input class="input mono" id="shPauseStart" type="time" value="${sh.pauseStart || ''}">
+        </div>
+        <div class="field full">
+          <label class="field-label">Pause fin</label>
+          <input class="input mono" id="shPauseEnd" type="time" value="${sh.pauseEnd || ''}">
+        </div>
+        <div class="field full">
+          <label class="field-label">Libellé (optionnel)</label>
+          <input class="input" id="shLabel" placeholder="ex: Patron, Renfort..." value="${esc(sh.label || '')}">
+        </div>
       </div>
     </div>
   `;
@@ -886,9 +1005,9 @@ function openShiftEditor(empId, dayIdx) {
     <button class="btn-pri" id="shSave" style="width:auto;padding:10px 18px;">Enregistrer</button>
   `;
 
-  const { close } = openModal({ title: 'Shift', body, footer });
+  const { close } = openModal({ title: 'Édition du jour', body, footer });
 
-  let chosenType = sh.type;
+  let chosenType = sh.type || 'soir';
   $$('#shType [data-t]').forEach(b => b.addEventListener('click', e => {
     chosenType = e.target.dataset.t;
     $$('#shType [data-t]').forEach(x => x.classList.toggle('active', x === e.target));
@@ -896,17 +1015,32 @@ function openShiftEditor(empId, dayIdx) {
     $('#shType').setAttribute('data-active', idx);
   }));
 
+  $('#shLeaveType').addEventListener('change', ev => {
+    $('#shFieldsWrap').style.display = ev.target.value ? 'none' : '';
+  });
+
   $('#shSave').addEventListener('click', () => {
-    const newSh = {
-      type: chosenType,
-      start: $('#shStart').value,
-      end: $('#shEnd').value,
-      pauseDuration: parseInt($('#shPause').value) || 0,
-      label: $('#shLabel').value.trim()
-    };
+    const leave = $('#shLeaveType').value;
+    let newSh;
+    if (leave) {
+      newSh = { leaveType: leave, label: LEAVE_TYPES[leave].label };
+    } else {
+      newSh = {
+        type: chosenType,
+        start: $('#shStart').value,
+        end: $('#shEnd').value,
+        pauseDuration: parseInt($('#shPauseDur').value) || 0,
+      };
+      const ps = $('#shPauseStart').value;
+      const pe = $('#shPauseEnd').value;
+      const lbl = $('#shLabel').value.trim();
+      if (ps) newSh.pauseStart = ps;
+      if (pe) newSh.pauseEnd = pe;
+      if (lbl) newSh.label = lbl;
+    }
     state.shifts[key] = [newSh];
     fbSave(`shifts/${key}`, [newSh]);
-    toast('Shift enregistré', 'good');
+    toast('Enregistré', 'good');
     close();
     render();
   });
@@ -915,12 +1049,243 @@ function openShiftEditor(empId, dayIdx) {
     $('#shDel').addEventListener('click', () => {
       delete state.shifts[key];
       fbSave(`shifts/${key}`, null);
-      toast('Shift supprimé', '');
+      toast('Supprimé', '');
       close();
       render();
     });
   }
 }
+
+// ─────────── MONTH VIEW ───────────
+function pageMonth() {
+  const anchor = state.monthAnchor;
+  const year = anchor.getFullYear();
+  const month = anchor.getMonth();
+  const monthName = MONTHS_FR[month];
+  const firstDay = new Date(year, month, 1);
+  const lastDay = new Date(year, month+1, 0);
+  // First Monday on or before firstDay
+  const gridStart = getMonday(firstDay);
+  // Last Sunday on or after lastDay
+  const lastDayOfWeek = (lastDay.getDay() + 6) % 7;
+  const gridEnd = addDays(lastDay, 6 - lastDayOfWeek);
+  const totalDays = Math.round((gridEnd - gridStart) / 86400000) + 1;
+
+  const actives = state.employees.filter(e => e.statut === 'Actif');
+  const todayISO = dateISO(new Date());
+
+  // Aggregate per day
+  const daysData = [];
+  let monthTotalH = 0;
+  for (let i = 0; i < totalDays; i++) {
+    const d = addDays(gridStart, i);
+    const wk = weekKey(d);
+    const dayIdx = (d.getDay() + 6) % 7;
+    const inMonth = d.getMonth() === month;
+    let dayH = 0, workers = 0, leaves = [];
+    actives.forEach(e => {
+      const shifts = (state.shifts[`${e.id}_${dayIdx}_${wk}`] || []).map(normShift);
+      shifts.forEach(s => {
+        if (s.leaveType) {
+          leaves.push({emp:e, leaveType:s.leaveType});
+        } else {
+          dayH += shiftHours(s);
+          workers++;
+        }
+      });
+    });
+    if (inMonth) monthTotalH += dayH;
+    daysData.push({date:d, inMonth, dayH, workers, leaves});
+  }
+
+  return `
+    <div class="page-head">
+      <div>
+        <div class="uppercase-eyebrow">Vue mois</div>
+        <h1 class="h-1" style="text-transform:capitalize;">${monthName} ${year}</h1>
+        <div class="chip" style="margin-top:6px;">${Math.round(monthTotalH)} h planifiées dans le mois</div>
+      </div>
+      <div class="page-actions">
+        <div class="week-nav">
+          <button class="btn-icon" data-mnav="prev">←</button>
+          <button class="btn-sec" data-mnav="today">Ce mois</button>
+          <button class="btn-icon" data-mnav="next">→</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-body nopad">
+        <div class="month-grid">
+          ${DAYS_SHORT.map(d => `<div class="mc head"><div class="day">${d}</div></div>`).join('')}
+          ${daysData.map(d => {
+            const isToday = dateISO(d.date) === todayISO;
+            return `
+              <div class="mc ${d.inMonth?'':'out'} ${isToday?'today':''}" data-mday="${dateISO(d.date)}">
+                <div class="mc-date ${isToday?'today':''}">${d.date.getDate()}</div>
+                ${d.workers > 0 ? `<div class="mc-stat"><strong>${d.dayH.toFixed(1)}h</strong> · ${d.workers} pers.</div>` : ''}
+                ${d.leaves.length > 0 ? `<div class="mc-leaves">${d.leaves.map(l => `<span class="mc-leave ${LEAVE_TYPES[l.leaveType]?.color || ''}" title="${esc(l.emp.prenom)} — ${esc(LEAVE_TYPES[l.leaveType]?.label || '')}">${esc(l.emp.prenom.charAt(0))}</span>`).join('')}</div>` : ''}
+              </div>
+            `;
+          }).join('')}
+        </div>
+      </div>
+    </div>
+
+    <div class="row" style="margin-top:14px;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--c-ink-4);">
+      <span><span class="dot-color" style="background:#dbeafe;"></span> CP</span>
+      <span><span class="dot-color" style="background:#fef3c7;"></span> Absent justifié</span>
+      <span><span class="dot-color" style="background:#fee2e2;"></span> Absent injustifié</span>
+      <span><span class="dot-color" style="background:#ede9fe;"></span> Arrêt maladie</span>
+      <span><span class="dot-color" style="background:#cffafe;"></span> RTT</span>
+    </div>
+  `;
+}
+
+function bindMonth() {
+  $$('[data-mnav]').forEach(b => b.addEventListener('click', e => {
+    const a = e.currentTarget.dataset.mnav;
+    if (a === 'prev') state.monthAnchor = new Date(state.monthAnchor.getFullYear(), state.monthAnchor.getMonth()-1, 1);
+    else if (a === 'next') state.monthAnchor = new Date(state.monthAnchor.getFullYear(), state.monthAnchor.getMonth()+1, 1);
+    else state.monthAnchor = new Date();
+    render();
+  }));
+  $$('[data-mday]').forEach(c => c.addEventListener('click', e => {
+    const iso = e.currentTarget.dataset.mday;
+    state.weekStart = getMonday(new Date(iso));
+    state.page = 'planning';
+    render();
+  }));
+}
+
+// ─────────── HOURS TRACKING ───────────
+function pageHours() {
+  const actives = state.employees.filter(e => e.statut === 'Actif');
+  const now = new Date();
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const monthEnd = new Date(now.getFullYear(), now.getMonth()+1, 0);
+
+  // Heures par employé pour le mois courant
+  const monthData = actives.map(emp => {
+    let planned = 0, real = 0, leaves = {};
+    for (let d = new Date(monthStart); d <= monthEnd; d = addDays(d, 1)) {
+      const wk = weekKey(d);
+      const dayIdx = (d.getDay() + 6) % 7;
+      const shifts = (state.shifts[`${emp.id}_${dayIdx}_${wk}`] || []).map(normShift);
+      shifts.forEach(s => {
+        if (s.leaveType) {
+          leaves[s.leaveType] = (leaves[s.leaveType] || 0) + 1;
+        } else {
+          planned += shiftHours(s);
+        }
+      });
+      const punches = state.punches[`${emp.id}_${dateISO(d)}`] || [];
+      punches.forEach(p => {
+        if (p.in && p.out) {
+          let dur = timeToMin(p.out) - timeToMin(p.in);
+          if (dur < 0) dur += 24*60;
+          real += dur / 60;
+        }
+      });
+    }
+    const monthlyContract = (emp.heures || 35) * 4.33;
+    return { emp, planned, real, leaves, monthlyContract };
+  });
+
+  // Heures par semaine (8 dernières semaines)
+  const weeks = [];
+  for (let i = 7; i >= 0; i--) weeks.push(addDays(state.weekStart, -7 * i));
+
+  return `
+    <div class="page-head">
+      <div>
+        <div class="uppercase-eyebrow">Suivi des heures</div>
+        <h1 class="h-1">Heures par salarié</h1>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">
+        <h3>Mois en cours · ${MONTHS_FR[now.getMonth()]} ${now.getFullYear()}</h3>
+      </div>
+      <div class="panel-body nopad">
+        <table class="tbl">
+          <thead>
+            <tr>
+              <th>Salarié</th>
+              <th>Contrat</th>
+              <th>Heures planifiées</th>
+              <th>Heures réelles</th>
+              <th>Écart planning</th>
+              <th>Absences / Congés</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${monthData.map(({emp, planned, real, leaves, monthlyContract}) => {
+              const gap = planned - monthlyContract;
+              const leaveSummary = Object.entries(leaves).map(([k,v]) => `${v} ${LEAVE_TYPES[k]?.short || k}`).join(' · ');
+              return `
+                <tr>
+                  <td><div class="emp-cell"><div class="av-emp sm">${initials(emp)}</div><div><div class="emp-cell-name">${esc(emp.prenom)} ${esc(emp.nom)}</div><div class="emp-cell-meta">${esc(emp.poste)}</div></div></div></td>
+                  <td class="mono">${emp.heures}h/sem (~${monthlyContract.toFixed(0)}h/mois)</td>
+                  <td class="mono tabular">${planned.toFixed(1)} h</td>
+                  <td class="mono tabular">${real > 0 ? real.toFixed(1)+' h' : '<span class="text-dim">—</span>'}</td>
+                  <td><span class="chip ${Math.abs(gap)<5?'':(gap>0?'warn':'alert')}">${gap>=0?'+':''}${gap.toFixed(1)} h</span></td>
+                  <td>${leaveSummary || '<span class="text-dim">—</span>'}</td>
+                </tr>
+              `;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top:14px;">
+      <div class="panel-head">
+        <h3>8 dernières semaines · heures planifiées</h3>
+      </div>
+      <div class="panel-body nopad" style="overflow-x:auto;">
+        <table class="tbl">
+          <thead>
+            <tr>
+              <th>Salarié</th>
+              <th>Contrat</th>
+              ${weeks.map(w => `<th class="mono">S.${pad(w.getDate())}/${pad(w.getMonth()+1)}</th>`).join('')}
+              <th>Moy./sem</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${actives.map(emp => {
+              const wkHours = weeks.map(w => {
+                const wk = weekKey(w);
+                let h = 0;
+                for (let d = 0; d < 7; d++) {
+                  (state.shifts[`${emp.id}_${d}_${wk}`] || []).map(normShift).forEach(s => h += shiftHours(s));
+                }
+                return h;
+              });
+              const avg = wkHours.reduce((a,b)=>a+b,0) / wkHours.length;
+              return `
+                <tr>
+                  <td><div class="emp-cell"><div class="av-emp sm">${initials(emp)}</div><span class="emp-cell-name">${esc(emp.prenom)}</span></div></td>
+                  <td class="mono">${emp.heures}h</td>
+                  ${wkHours.map(h => {
+                    const gap = h - emp.heures;
+                    const cls = h === 0 ? 'text-dim' : Math.abs(gap) < 1 ? '' : gap > 0 ? 'over' : 'under';
+                    return `<td class="mono tabular ${cls}">${h > 0 ? h.toFixed(1) : '—'}</td>`;
+                  }).join('')}
+                  <td class="mono tabular"><strong>${avg.toFixed(1)}</strong></td>
+                </tr>
+              `;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+function bindHours() {}
 
 // ─────────── POINTAGES ───────────
 function pagePointages() {
@@ -1209,32 +1574,49 @@ function empHome() {
   const iso = dateISO(now);
   const dayIdx = (now.getDay() + 6) % 7;
   const wk = weekKey(now);
-  const today = state.shifts[`${empId}_${dayIdx}_${wk}`] || [];
+  const today = (state.shifts[`${empId}_${dayIdx}_${wk}`] || []).map(normShift);
   const punches = state.punches[`${empId}_${iso}`] || [];
   const last = punches[punches.length-1];
   const ongoing = last && last.in && !last.out;
 
+  const pub = state.publications[wk];
+  const showPubBanner = pub && (Date.now() - new Date(pub.publishedAt).getTime() < 7*24*60*60*1000);
+
+  const todayLeave = today.find(s => s.leaveType);
+
   let statusText = '';
-  if (today.length === 0) statusText = `Aucun shift prévu aujourd'hui.`;
+  if (todayLeave) statusText = `Aujourd'hui : ${LEAVE_TYPES[todayLeave.leaveType]?.label || 'Absence'}`;
+  else if (today.length === 0) statusText = `Aucun shift prévu aujourd'hui.`;
   else if (ongoing) statusText = `Pointé à ${last.in} — en service.`;
   else if (last && last.out) statusText = `Dernier pointage : ${last.in} → ${last.out}.`;
   else statusText = `Shift prévu : ${today[0].start} → ${today[0].end}.`;
 
   return `
+    ${showPubBanner ? `
+      <div class="pub-banner">
+        <div style="flex:1;">
+          <div style="font-weight:500;font-size:13px;">📢 Nouveau planning publié</div>
+          <div style="font-size:11.5px;opacity:.85;margin-top:2px;">Publié ${new Date(pub.publishedAt).toLocaleString('fr-FR',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})}</div>
+        </div>
+        <button class="btn-ghost" data-page="myweek" style="color:inherit;font-weight:500;">Voir →</button>
+      </div>
+    ` : ''}
+
     <div class="punch-card">
       <div class="punch-time" id="punchClock">${pad(now.getHours())}:${pad(now.getMinutes())}</div>
       <div class="punch-date">${now.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' })}</div>
       <div class="punch-status">${statusText}</div>
-      ${ongoing
-        ? `<button class="punch-btn" id="btnPunchOut">Pointer la sortie</button>`
-        : (today.length > 0 || punches.length > 0)
-          ? `<button class="punch-btn" id="btnPunchIn">Pointer l'entrée</button>`
-          : `<button class="punch-btn" id="btnPunchIn">Pointer l'arrivée (hors planning)</button>`
+      ${todayLeave ? '' :
+        (ongoing
+          ? `<button class="punch-btn" id="btnPunchOut">Pointer la sortie</button>`
+          : (today.length > 0 || punches.length > 0)
+            ? `<button class="punch-btn" id="btnPunchIn">Pointer l'entrée</button>`
+            : `<button class="punch-btn" id="btnPunchIn">Pointer l'arrivée (hors planning)</button>`)
       }
       ${punches.length ? `<button class="punch-btn secondary" id="btnSignal">Signaler une modification</button>` : ''}
     </div>
 
-    ${today.length ? `
+    ${today.length && !todayLeave ? `
       <div class="panel">
         <div class="panel-head"><h3>Shift d'aujourd'hui</h3></div>
         <div class="panel-body">
@@ -1242,7 +1624,7 @@ function empHome() {
             <div class="row" style="justify-content:space-between;">
               <div>
                 <div style="font-family:var(--f-mono);font-size:16px;">${s.start} → ${s.end}</div>
-                <div class="text-mute" style="font-size:12px;margin-top:2px;">${esc(s.label || (s.type==='midi'?'Service midi':s.type==='soir'?'Service soir':'Journée'))}</div>
+                <div class="text-mute" style="font-size:12px;margin-top:2px;">${esc(s.label || (s.type==='midi'?'Service midi':s.type==='soir'?'Service soir':'Journée'))}${s.pauseDuration?` · pause ${s.pauseDuration}mn`:''}</div>
               </div>
               <div class="mono tabular" style="font-size:13px;color:var(--c-ink-4);">${shiftHours(s).toFixed(1)} h</div>
             </div>`).join('')}
@@ -1349,7 +1731,7 @@ function empWeek() {
   const cards = [0,1,2,3,4,5,6].map(i => {
     const d = addDays(state.weekStart, i);
     const iso = dateISO(d);
-    const shifts = state.shifts[`${empId}_${i}_${wk}`] || [];
+    const shifts = (state.shifts[`${empId}_${i}_${wk}`] || []).map(normShift);
     const isToday = iso === todayISO;
     const hours = shifts.reduce((s, sh) => s + shiftHours(sh), 0);
     totalH += hours;
@@ -1359,14 +1741,26 @@ function empWeek() {
         <div class="day-info"><div class="day-shift">Repos</div></div>
       </div>`;
     }
-    return shifts.map(s => `
+    return shifts.map(s => {
+      if (s.leaveType) {
+        const lt = LEAVE_TYPES[s.leaveType];
+        return `<div class="day-card ${isToday?'today':''}" style="border-left:3px solid currentColor;">
+          <div><div class="day-num">${d.getDate()}</div><div class="day-name">${DAYS_SHORT[i]}</div></div>
+          <div class="day-info">
+            <div class="day-shift" style="font-family:var(--f-body);">${esc(lt?.label || 'Absence')}</div>
+            <div class="day-meta">Non travaillé</div>
+          </div>
+        </div>`;
+      }
+      return `
       <div class="day-card ${isToday?'today':''}">
         <div><div class="day-num">${d.getDate()}</div><div class="day-name">${DAYS_SHORT[i]}</div></div>
         <div class="day-info">
           <div class="day-shift">${s.start} → ${s.end}</div>
-          <div class="day-meta">${esc(s.label || (s.type==='midi'?'Service midi':s.type==='soir'?'Service soir':'Journée'))} · ${shiftHours(s).toFixed(1)} h</div>
+          <div class="day-meta">${esc(s.label || (s.type==='midi'?'Service midi':s.type==='soir'?'Service soir':'Journée'))} · ${shiftHours(s).toFixed(1)} h${s.pauseDuration?` · pause ${s.pauseDuration}mn`:''}</div>
         </div>
-      </div>`).join('');
+      </div>`;
+    }).join('');
   }).join('');
 
   return `
