@@ -249,13 +249,63 @@ const state = {
   shifts: {},        // key `${empId}_${dayIdx}_${weekKey}` → [{type,start,end,...}]
   punches: {},       // key `${empId}_${dateISO}` → [{in:'08:32',out:'14:15',meta?}]
   publications: {},  // key weekKey → {publishedAt, by, note}
+  absenceRequests: {}, // keyed by request id
   weekStart: getMonday(new Date()),
   fbReady: false,
   page: null,        // current page id
   loading: true,
-  monthView: false,  // toggle between week/month view in planning
+  monthView: false,
   monthAnchor: new Date(),
+  empDetail: null,   // current employee id being viewed in detail (null = list)
+  empTab: 'info',    // active tab in employee detail
+  rhTab: 'entries',  // active tab in Suivi RH page
+  reqTab: 'pending', // active tab in absence requests
 };
+
+// ─────────── EMPLOYEE NORMALIZATION ───────────
+function normEmp(e) {
+  if (!e) return null;
+  const defaults = {
+    nomNaissance: '', genre: '', dateNaissance: '', paysNaissance: '',
+    departementNaissance: '', communeNaissance: '', nationalite: '',
+    email: '', telMobile: '', telFixe: '', notifSMS: false,
+    adresse: '', complementAdresse: '', codePostal: '', ville: '', pays: 'France',
+    contratDebut: '', contratFin: '', periodeEssaiJours: 60,
+    remuneration: 0, joursTravailles: 5,
+    dateSortie: '', motifSortie: '',
+    cpAcquisN: e.cpAcquis ?? 25,
+    cpPrisN: e.cpPris ?? 0,
+    cpAcquisNm1: 0, cpPrisNm1: 0,
+    reposCompensateur: 0, recupJoursFeries: 0,
+    travailleurEtranger: false, titreSejourType: '',
+    titreSejourNumero: '', titreSejourDebut: '', titreSejourFin: '',
+    peutSeConnecter: true,
+    dispos: { 0: true, 1: true, 2: true, 3: true, 4: true, 5: true, 6: true },
+    avenants: [], documents: [],
+  };
+  return { ...defaults, ...e };
+}
+
+function isProfileComplete(e) {
+  const n = normEmp(e);
+  return !!(n.email && n.telMobile && n.dateNaissance && n.adresse && n.codePostal && n.ville && n.contratDebut);
+}
+
+// Compute CP pris from shifts for current year (auto-calculate from leave shifts)
+function computeCpPris(empId) {
+  let count = 0;
+  const yr = new Date().getFullYear();
+  Object.entries(state.shifts).forEach(([key, shifts]) => {
+    if (!key.startsWith(`${empId}_`)) return;
+    const wk = key.split('_')[2];
+    if (!wk || !wk.startsWith(String(yr))) return;
+    (shifts || []).forEach(s => {
+      const n = normShift(s);
+      if (n.leaveType === 'cp') count++;
+    });
+  });
+  return count;
+}
 
 // ─────────── UTILS ───────────
 function $(sel, root=document) { return root.querySelector(sel); }
@@ -277,6 +327,15 @@ function weekKey(d) { return dateISO(getMonday(d)); }
 function addDays(d, n) { const x = new Date(d); x.setDate(x.getDate()+n); return x; }
 function fmtDateLong(d) {
   return d.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' });
+}
+function fmtDateShort(d) {
+  if (!d) return '—';
+  if (typeof d === 'string') {
+    const parts = d.split('-');
+    if (parts.length === 3) return `${parts[2]}/${parts[1]}/${parts[0]}`;
+    return d;
+  }
+  return d.toLocaleDateString('fr-FR');
 }
 function fmtRange(d1, d2) {
   const sameMonth = d1.getMonth() === d2.getMonth();
@@ -353,7 +412,7 @@ async function initFirebase() {
 
 function fbListen() {
   if (!db) return;
-  ['employees','shifts','punches','publications'].forEach(k => {
+  ['employees','shifts','punches','publications','absenceRequests'].forEach(k => {
     db.ref(k).on('value', snap => {
       const v = snap.val();
       if (k === 'employees' && v) {
@@ -374,10 +433,8 @@ function fbListen() {
         console.log('[fb] shifts loaded:', Object.keys(state.shifts).length);
       }
       if (k === 'punches' && v) state.punches = v;
-      if (k === 'publications' && v) {
-        state.publications = v;
-        console.log('[fb] publications loaded:', Object.keys(state.publications).length);
-      }
+      if (k === 'publications' && v) state.publications = v;
+      if (k === 'absenceRequests' && v) state.absenceRequests = v;
       render();
     }, err => {
       console.error('[fb] read error on', k, err);
@@ -598,7 +655,7 @@ function viewLogin() {
     <div class="login-screen">
       <div class="login-card">
         <div class="login-mark">M</div>
-        <h1 class="login-h">Man'<em>ouché</em></h1>
+        <h1 class="login-h">Man'ouché</h1>
         <div class="login-sub">Espace RH</div>
 
         <div class="tab-switch" data-active="${loginMode === 'admin' ? '1' : '0'}">
@@ -650,13 +707,14 @@ function bindLogin() {
 // ─────────── ADMIN SHELL ───────────
 function viewAdminShell() {
   const anomalies = detectAnomalies();
+  const pendingReqs = Object.values(state.absenceRequests || {}).filter(r => r && r.status === 'pending').length;
   return `
     <div class="shell">
       <aside class="side">
         <div class="side-brand">
           <div class="side-mark">M</div>
           <div>
-            <div class="side-brand-name">Man'<em>ouché</em></div>
+            <div class="side-brand-name">Man'ouché</div>
             <div class="side-brand-sub">Console RH</div>
           </div>
         </div>
@@ -688,10 +746,23 @@ function viewAdminShell() {
           ${anomalies.length ? `<span class="badge">${anomalies.length}</span>` : ''}
         </button>
 
-        <div class="side-section">Données</div>
+        <div class="side-section">Équipe & RH</div>
         <button class="nav-item ${state.page==='employees'?'active':''}" data-page="employees">
           <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>
           Salariés
+        </button>
+        <button class="nav-item ${state.page==='requests'?'active':''}" data-page="requests">
+          <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/></svg>
+          Demandes d'absence
+          ${pendingReqs > 0 ? `<span class="badge">${pendingReqs}</span>` : ''}
+        </button>
+        <button class="nav-item ${state.page==='cp'?'active':''}" data-page="cp">
+          <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.2 4.2l1.4 1.4M18.4 18.4l1.4 1.4M1 12h2M21 12h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4"/></svg>
+          Compteurs CP
+        </button>
+        <button class="nav-item ${state.page==='rh'?'active':''}" data-page="rh">
+          <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><path d="M22 4L12 14.01l-3-3"/></svg>
+          Suivi RH
         </button>
 
         <div class="side-foot">
@@ -712,7 +783,7 @@ function viewAdminShell() {
       <div class="main">
         <div class="mob-head">
           <div class="side-mark">M</div>
-          <div class="brand">Man'<em style="font-style:italic;color:var(--c-ink-5);">ouché</em></div>
+          <div class="brand">Man'ouché</div>
           <select id="mobNav">
             <option value="dashboard" ${state.page==='dashboard'?'selected':''}>Tableau de bord</option>
             <option value="planning" ${state.page==='planning'?'selected':''}>Planning</option>
@@ -721,6 +792,9 @@ function viewAdminShell() {
             <option value="pointages" ${state.page==='pointages'?'selected':''}>Pointages</option>
             <option value="alerts" ${state.page==='alerts'?'selected':''}>Alertes${anomalies.length?` (${anomalies.length})`:''}</option>
             <option value="employees" ${state.page==='employees'?'selected':''}>Salariés</option>
+            <option value="requests" ${state.page==='requests'?'selected':''}>Demandes${pendingReqs?` (${pendingReqs})`:''}</option>
+            <option value="cp" ${state.page==='cp'?'selected':''}>Compteurs CP</option>
+            <option value="rh" ${state.page==='rh'?'selected':''}>Suivi RH</option>
           </select>
           <button class="btn-icon" data-logout style="color:rgba(255,255,255,.7);">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg>
@@ -742,7 +816,10 @@ function renderAdminPage() {
     case 'hours': return pageHours();
     case 'pointages': return pagePointages();
     case 'alerts': return pageAlerts();
-    case 'employees': return pageEmployees();
+    case 'employees': return state.empDetail ? pageEmployeeDetail() : pageEmployees();
+    case 'requests': return pageAbsenceRequests();
+    case 'cp': return pageCpCompteurs();
+    case 'rh': return pageRH();
     default: return pageDashboard();
   }
 }
@@ -750,13 +827,17 @@ function renderAdminPage() {
 function bindAdmin() {
   $$('[data-page]').forEach(b => b.addEventListener('click', e => {
     state.page = e.currentTarget.dataset.page;
+    state.empDetail = null;
     render();
   }));
   $$('[data-logout]').forEach(b => b.addEventListener('click', logout));
   const mob = $('#mobNav');
-  if (mob) mob.addEventListener('change', e => { state.page = e.target.value; render(); });
+  if (mob) mob.addEventListener('change', e => {
+    state.page = e.target.value;
+    state.empDetail = null;
+    render();
+  });
 
-  // Page-specific bindings
   switch (state.page) {
     case 'dashboard': bindDashboard(); break;
     case 'planning': bindPlanning(); break;
@@ -764,7 +845,10 @@ function bindAdmin() {
     case 'hours': bindHours(); break;
     case 'pointages': bindPointages(); break;
     case 'alerts': bindAlerts(); break;
-    case 'employees': bindEmployees(); break;
+    case 'employees': state.empDetail ? bindEmployeeDetail() : bindEmployees(); break;
+    case 'requests': bindAbsenceRequests(); break;
+    case 'cp': bindCpCompteurs(); break;
+    case 'rh': bindRH(); break;
   }
 }
 
@@ -1592,7 +1676,12 @@ function pageAlerts() {
 function bindAlerts() {}
 
 // ─────────── EMPLOYEES ───────────
+// ─────────── EMPLOYEES — LIST ───────────
 function pageEmployees() {
+  const sorted = [...state.employees].sort((a,b) => {
+    if (a.statut !== b.statut) return a.statut === 'Actif' ? -1 : 1;
+    return (a.prenom + a.nom).localeCompare(b.prenom + b.nom);
+  });
   return `
     <div class="page-head">
       <div>
@@ -1607,20 +1696,23 @@ function pageEmployees() {
     <div class="panel">
       <div class="panel-body nopad">
         <table class="tbl">
-          <thead><tr><th>Salarié</th><th>Poste</th><th>Contrat</th><th>Heures</th><th>Username</th><th>Code</th><th>Statut</th><th></th></tr></thead>
+          <thead><tr><th>Salarié</th><th>Poste</th><th>Contrat</th><th>Heures</th><th>Email</th><th>Statut</th><th>Profil</th><th></th></tr></thead>
           <tbody>
-            ${state.employees.map(e => `
+            ${sorted.map(e => {
+              const n = normEmp(e);
+              const complete = isProfileComplete(n);
+              return `
               <tr>
-                <td><div class="emp-cell"><div class="av-emp">${initials(e)}</div><div><div class="emp-cell-name">${esc(e.prenom)} ${esc(e.nom)}</div><div class="emp-cell-meta">${esc(e.email||'')}</div></div></div></td>
-                <td>${esc(e.poste)}</td>
-                <td><span class="chip">${esc(e.contrat)}</span></td>
-                <td class="mono tabular">${e.heures}h</td>
-                <td class="mono">${esc(e.username)}</td>
-                <td class="mono">${esc(String(e.code))}</td>
-                <td><span class="status-dot ${e.statut==='Actif'?'on':'off'}">${esc(e.statut)}</span></td>
-                <td><button class="btn-ghost" data-edit-emp="${e.id}">Éditer</button></td>
+                <td><div class="emp-cell"><div class="av-emp">${initials(e)}</div><div><div class="emp-cell-name">${esc(e.prenom)} ${esc(e.nom)}</div><div class="emp-cell-meta">${esc(n.telMobile||'—')}</div></div></div></td>
+                <td>${esc(e.poste||'—')}</td>
+                <td><span class="chip">${esc(e.contrat||'—')}</span></td>
+                <td class="mono tabular">${e.heures||0}h</td>
+                <td class="mono" style="font-size:12px;">${esc(n.email||'—')}</td>
+                <td><span class="status-dot ${e.statut==='Actif'?'on':'off'}">${esc(e.statut||'—')}</span></td>
+                <td>${complete ? '<span class="chip good" style="font-size:10.5px;">✓ Complet</span>' : '<span class="chip warn" style="font-size:10.5px;">À compléter</span>'}</td>
+                <td><button class="btn-ghost" data-view-emp="${e.id}">Voir →</button></td>
               </tr>
-            `).join('')}
+            `}).join('')}
           </tbody>
         </table>
       </div>
@@ -1629,92 +1721,1115 @@ function pageEmployees() {
 }
 
 function bindEmployees() {
-  $('#addEmp').addEventListener('click', () => openEmployeeEditor(null));
-  $$('[data-edit-emp]').forEach(b => b.addEventListener('click', e => {
-    const id = parseInt(e.currentTarget.dataset.editEmp);
-    openEmployeeEditor(id);
+  $('#addEmp').addEventListener('click', () => openEmployeeCreator());
+  $$('[data-view-emp]').forEach(b => b.addEventListener('click', e => {
+    const id = parseInt(e.currentTarget.dataset.viewEmp);
+    state.empDetail = id;
+    state.empTab = 'info';
+    render();
   }));
 }
 
-function openEmployeeEditor(id) {
-  const isNew = id == null;
-  const e = isNew
-    ? { id: Math.max(0, ...state.employees.map(x=>x.id)) + 1, prenom:'', nom:'', poste:'Cuisinier', contrat:'CDI', heures:35, taux:12, statut:'Actif', cpAcquis:25, cpPris:0, username:'', code:'1234', email:'' }
-    : { ...state.employees.find(x => x.id === id) };
-
+function openEmployeeCreator() {
+  const newId = Math.max(0, ...state.employees.map(x => x.id||0)) + 1;
   const body = `
     <div class="form-grid">
-      <div class="field"><label class="field-label">Prénom</label><input class="input" id="empPrenom" value="${esc(e.prenom)}"></div>
-      <div class="field"><label class="field-label">Nom</label><input class="input" id="empNom" value="${esc(e.nom)}"></div>
-      <div class="field"><label class="field-label">Poste</label><input class="input" id="empPoste" value="${esc(e.poste)}"></div>
+      <div class="field"><label class="field-label">Prénom *</label><input class="input" id="ncPrenom"></div>
+      <div class="field"><label class="field-label">Nom *</label><input class="input" id="ncNom"></div>
+      <div class="field"><label class="field-label">Poste</label><input class="input" id="ncPoste" value="Cuisinier"></div>
       <div class="field"><label class="field-label">Contrat</label>
-        <select class="input" id="empContrat">
-          ${['CDI','CDD','Extra','Apprenti','Stage'].map(c => `<option ${c===e.contrat?'selected':''}>${c}</option>`).join('')}
+        <select class="input" id="ncContrat">
+          ${['CDI','CDD','Extra','Apprenti','Stage'].map(c => `<option>${c}</option>`).join('')}
         </select>
       </div>
-      <div class="field"><label class="field-label">Heures hebdo</label><input class="input mono" id="empHeures" type="number" value="${e.heures}"></div>
-      <div class="field"><label class="field-label">Taux horaire (€)</label><input class="input mono" id="empTaux" type="number" step="0.01" value="${e.taux}"></div>
-      <div class="field"><label class="field-label">Username</label><input class="input mono" id="empUser" value="${esc(e.username)}" placeholder="prenom.n"></div>
-      <div class="field"><label class="field-label">Code PIN</label><input class="input mono" id="empCode" value="${esc(String(e.code))}"></div>
-      <div class="field full"><label class="field-label">Email</label><input class="input" id="empEmail" type="email" value="${esc(e.email||'')}"></div>
-      <div class="field full"><label class="field-label">Statut</label>
-        <div class="tab-switch" id="empStatut" data-active="${e.statut==='Actif'?'0':'1'}">
-          <button data-s="Actif" class="${e.statut==='Actif'?'active':''}">Actif</button>
-          <button data-s="Inactif" class="${e.statut==='Inactif'?'active':''}">Inactif</button>
+      <div class="field"><label class="field-label">Heures hebdo</label><input class="input mono" id="ncHeures" type="number" value="35"></div>
+      <div class="field"><label class="field-label">Email</label><input class="input" id="ncEmail" type="email"></div>
+    </div>
+    <div class="text-mute" style="margin-top:12px;font-size:12px;">Les autres infos (état civil, adresse, etc.) se complètent depuis la fiche du salarié.</div>
+  `;
+  const footer = `
+    <div class="spacer"></div>
+    <button class="btn-sec" data-close>Annuler</button>
+    <button class="btn-pri" id="ncSave" style="width:auto;padding:10px 18px;">Créer</button>
+  `;
+  const { close } = openModal({ title: 'Nouveau salarié', body, footer });
+  $('#ncSave').addEventListener('click', () => {
+    const prenom = $('#ncPrenom').value.trim();
+    const nom = $('#ncNom').value.trim();
+    if (!prenom || !nom) { toast('Prénom et nom requis', 'error'); return; }
+    const emp = normEmp({
+      id: newId, prenom, nom,
+      poste: $('#ncPoste').value.trim() || 'Cuisinier',
+      contrat: $('#ncContrat').value,
+      heures: parseInt($('#ncHeures').value) || 35,
+      email: $('#ncEmail').value.trim(),
+      taux: 12, statut: 'Actif',
+      username: prenom.toLowerCase().replace(/[^a-z0-9]/g,''),
+      code: '1234',
+    });
+    state.employees.push(emp);
+    fbSave('employees', state.employees);
+    toast('Salarié créé', 'good');
+    close();
+    state.empDetail = newId;
+    state.empTab = 'info';
+    render();
+  });
+}
+
+// ─────────── EMPLOYEE DETAIL ───────────
+function pageEmployeeDetail() {
+  const e = state.employees.find(x => x.id === state.empDetail);
+  if (!e) { state.empDetail = null; return pageEmployees(); }
+  const n = normEmp(e);
+  const tab = state.empTab || 'info';
+
+  return `
+    <div class="row" style="margin-bottom:14px;">
+      <button class="btn-ghost" id="backToList">← Retour à la liste</button>
+    </div>
+
+    <div class="emp-header">
+      <div class="emp-header-top">
+        <div class="av-emp lg">${initials(e)}</div>
+        <div style="flex:1;">
+          <div class="emp-header-name">${esc(e.prenom)} ${esc(e.nom)}</div>
+          <div class="emp-header-sub">${esc(e.poste||'—')} · ${esc(e.contrat||'—')} · ${e.heures||0}h</div>
+        </div>
+        <span class="status-dot ${e.statut==='Actif'?'on':'off'}" style="background:rgba(255,255,255,.15);color:#fff;">${esc(e.statut||'—')}</span>
+      </div>
+      <div class="emp-header-grid">
+        <div><div class="ehg-label">Début contrat</div><div class="ehg-value">${n.contratDebut ? fmtDateShort(n.contratDebut) : '—'}</div></div>
+        <div><div class="ehg-label">Fin contrat</div><div class="ehg-value">${n.contratFin ? fmtDateShort(n.contratFin) : '—'}</div></div>
+        <div><div class="ehg-label">Type</div><div class="ehg-value">${esc(e.contrat||'—')}</div></div>
+        <div><div class="ehg-label">Établissement</div><div class="ehg-value">Man'ouché</div></div>
+        <div><div class="ehg-label">Solde CP</div><div class="ehg-value">${(n.cpAcquisN - n.cpPrisN + n.cpAcquisNm1 - n.cpPrisNm1).toFixed(1)} j</div></div>
+      </div>
+    </div>
+
+    <div class="emp-tabs">
+      <button class="emp-tab ${tab==='info'?'active':''}" data-emp-tab="info">Informations personnelles</button>
+      <button class="emp-tab ${tab==='contrats'?'active':''}" data-emp-tab="contrats">Contrats</button>
+      <button class="emp-tab ${tab==='temps'?'active':''}" data-emp-tab="temps">Temps et planification</button>
+      <button class="emp-tab ${tab==='conges'?'active':''}" data-emp-tab="conges">Congés et Absences</button>
+      <button class="emp-tab ${tab==='docs'?'active':''}" data-emp-tab="docs">Documents</button>
+      <button class="emp-tab ${tab==='role'?'active':''}" data-emp-tab="role">Rôle et permissions</button>
+    </div>
+
+    <div class="emp-tabbody">
+      ${tab==='info' ? empTabInfo(n) :
+        tab==='contrats' ? empTabContrats(n) :
+        tab==='temps' ? empTabTemps(n) :
+        tab==='conges' ? empTabConges(n) :
+        tab==='docs' ? empTabDocs(n) :
+        tab==='role' ? empTabRole(n) : ''}
+    </div>
+  `;
+}
+
+function bindEmployeeDetail() {
+  $('#backToList').addEventListener('click', () => {
+    state.empDetail = null;
+    render();
+  });
+  $$('[data-emp-tab]').forEach(b => b.addEventListener('click', ev => {
+    state.empTab = ev.currentTarget.dataset.empTab;
+    render();
+  }));
+  // Tab-specific bindings
+  const tab = state.empTab || 'info';
+  if (tab === 'info') bindEmpTabInfo();
+  if (tab === 'contrats') bindEmpTabContrats();
+  if (tab === 'temps') bindEmpTabTemps();
+  if (tab === 'conges') bindEmpTabConges();
+  if (tab === 'role') bindEmpTabRole();
+}
+
+// ── INFOS PERSO TAB ──
+function empTabInfo(n) {
+  return `
+    <div class="info-grid">
+      <div class="panel">
+        <div class="panel-head"><h3>État civil</h3></div>
+        <div class="panel-body">
+          ${kvRow('Genre', n.genre || 'Non renseigné')}
+          ${kvRow('Prénom', n.prenom)}
+          ${kvRow('Nom de naissance', n.nomNaissance || 'Non renseigné')}
+          ${kvRow('Nom de famille', n.nom)}
+          ${kvRow('Nationalité', n.nationalite || 'Non renseigné')}
+          ${kvRow('Date de naissance', n.dateNaissance ? fmtDateShort(n.dateNaissance) : 'Non renseigné')}
+          ${kvRow('Pays de naissance', n.paysNaissance || 'Non renseigné')}
+          ${kvRow('Département de naissance', n.departementNaissance || 'Non renseigné')}
+          ${kvRow('Commune de naissance', n.communeNaissance || 'Non renseigné')}
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h3>Coordonnées</h3></div>
+        <div class="panel-body">
+          ${kvRow('Email', n.email || 'Non renseigné')}
+          ${kvRow('Tél. mobile', n.telMobile || 'Non renseigné')}
+          ${kvRow('Notifications SMS', n.notifSMS ? 'Oui' : 'Non')}
+          ${kvRow('Tél. fixe', n.telFixe || 'Non renseigné')}
+          ${kvRow('Adresse', n.adresse || 'Non renseigné')}
+          ${kvRow('Complément', n.complementAdresse || 'Non renseigné')}
+          ${kvRow('Code postal', n.codePostal || 'Non renseigné')}
+          ${kvRow('Ville', n.ville || 'Non renseigné')}
+          ${kvRow('Pays', n.pays || 'France')}
         </div>
       </div>
     </div>
+    <div class="row" style="justify-content:center;margin-top:18px;">
+      <button class="btn-pri" id="editInfo" style="width:auto;padding:10px 18px;">✎ Modifier les informations personnelles</button>
+    </div>
+  `;
+}
+
+function bindEmpTabInfo() {
+  $('#editInfo').addEventListener('click', () => openInfoEditor());
+}
+
+function openInfoEditor() {
+  const e = state.employees.find(x => x.id === state.empDetail);
+  const n = normEmp(e);
+  const body = `
+    <div class="modal-section-title">État civil</div>
+    <div class="form-grid">
+      <div class="field"><label class="field-label">Genre</label>
+        <select class="input" id="iGenre">
+          <option value="" ${!n.genre?'selected':''}>Non renseigné</option>
+          <option value="M" ${n.genre==='M'?'selected':''}>Masculin</option>
+          <option value="F" ${n.genre==='F'?'selected':''}>Féminin</option>
+        </select>
+      </div>
+      <div class="field"><label class="field-label">Prénom</label><input class="input" id="iPrenom" value="${esc(n.prenom)}"></div>
+      <div class="field"><label class="field-label">Nom de naissance</label><input class="input" id="iNomNaiss" value="${esc(n.nomNaissance)}"></div>
+      <div class="field"><label class="field-label">Nom de famille</label><input class="input" id="iNom" value="${esc(n.nom)}"></div>
+      <div class="field"><label class="field-label">Nationalité</label><input class="input" id="iNat" value="${esc(n.nationalite)}" placeholder="ex: Française"></div>
+      <div class="field"><label class="field-label">Date de naissance</label><input class="input" id="iDOB" type="date" value="${esc(n.dateNaissance)}"></div>
+      <div class="field"><label class="field-label">Pays de naissance</label><input class="input" id="iPaysN" value="${esc(n.paysNaissance)}"></div>
+      <div class="field"><label class="field-label">Département de naissance</label><input class="input" id="iDeptN" value="${esc(n.departementNaissance)}"></div>
+      <div class="field full"><label class="field-label">Commune de naissance</label><input class="input" id="iComN" value="${esc(n.communeNaissance)}"></div>
+    </div>
+
+    <div class="modal-section-title">Coordonnées</div>
+    <div class="form-grid">
+      <div class="field"><label class="field-label">Email</label><input class="input" id="iEmail" type="email" value="${esc(n.email)}"></div>
+      <div class="field"><label class="field-label">Tél. mobile</label><input class="input mono" id="iTelM" value="${esc(n.telMobile)}" placeholder="+33 6 ..."></div>
+      <div class="field"><label class="field-label">Tél. fixe</label><input class="input mono" id="iTelF" value="${esc(n.telFixe)}"></div>
+      <div class="field"><label class="field-label"><input type="checkbox" id="iNotif" ${n.notifSMS?'checked':''}> Notifications SMS</label></div>
+      <div class="field full"><label class="field-label">Adresse</label><input class="input" id="iAdr" value="${esc(n.adresse)}"></div>
+      <div class="field full"><label class="field-label">Complément d'adresse</label><input class="input" id="iAdr2" value="${esc(n.complementAdresse)}"></div>
+      <div class="field"><label class="field-label">Code postal</label><input class="input mono" id="iCP" value="${esc(n.codePostal)}"></div>
+      <div class="field"><label class="field-label">Ville</label><input class="input" id="iVille" value="${esc(n.ville)}"></div>
+      <div class="field"><label class="field-label">Pays</label><input class="input" id="iPays" value="${esc(n.pays)}"></div>
+    </div>
   `;
   const footer = `
-    ${!isNew ? `<button class="btn-danger" id="empDel">Supprimer</button>` : ''}
     <div class="spacer"></div>
     <button class="btn-sec" data-close>Annuler</button>
-    <button class="btn-pri" id="empSave" style="width:auto;padding:10px 18px;">Enregistrer</button>
+    <button class="btn-pri" id="iSave" style="width:auto;padding:10px 18px;">Enregistrer</button>
   `;
-  const { close } = openModal({ title: isNew ? 'Nouveau salarié' : `${e.prenom} ${e.nom}`, body, footer });
-
-  let chosenStatut = e.statut;
-  $$('#empStatut [data-s]').forEach(b => b.addEventListener('click', ev => {
-    chosenStatut = ev.target.dataset.s;
-    $$('#empStatut [data-s]').forEach(x => x.classList.toggle('active', x === ev.target));
-    $('#empStatut').setAttribute('data-active', chosenStatut === 'Actif' ? 0 : 1);
-  }));
-
-  $('#empSave').addEventListener('click', () => {
+  const { close } = openModal({ title: 'Modifier les informations personnelles', body, footer });
+  $('#iSave').addEventListener('click', () => {
     const updated = {
       ...e,
-      prenom: $('#empPrenom').value.trim(),
-      nom: $('#empNom').value.trim(),
-      poste: $('#empPoste').value.trim(),
-      contrat: $('#empContrat').value,
-      heures: parseInt($('#empHeures').value) || 35,
-      taux: parseFloat($('#empTaux').value) || 12,
-      username: $('#empUser').value.trim().toLowerCase(),
-      code: $('#empCode').value.trim(),
-      email: $('#empEmail').value.trim(),
-      statut: chosenStatut
+      genre: $('#iGenre').value,
+      prenom: $('#iPrenom').value.trim(),
+      nomNaissance: $('#iNomNaiss').value.trim(),
+      nom: $('#iNom').value.trim(),
+      nationalite: $('#iNat').value.trim(),
+      dateNaissance: $('#iDOB').value,
+      paysNaissance: $('#iPaysN').value.trim(),
+      departementNaissance: $('#iDeptN').value.trim(),
+      communeNaissance: $('#iComN').value.trim(),
+      email: $('#iEmail').value.trim(),
+      telMobile: $('#iTelM').value.trim(),
+      telFixe: $('#iTelF').value.trim(),
+      notifSMS: $('#iNotif').checked,
+      adresse: $('#iAdr').value.trim(),
+      complementAdresse: $('#iAdr2').value.trim(),
+      codePostal: $('#iCP').value.trim(),
+      ville: $('#iVille').value.trim(),
+      pays: $('#iPays').value.trim() || 'France',
     };
-    if (!updated.prenom || !updated.nom) { toast('Prénom et nom requis', 'error'); return; }
-    if (isNew) state.employees.push(updated);
-    else state.employees = state.employees.map(x => x.id === id ? updated : x);
+    state.employees = state.employees.map(x => x.id === e.id ? updated : x);
     fbSave('employees', state.employees);
-    toast(isNew ? 'Salarié créé' : 'Salarié modifié', 'good');
+    toast('Informations mises à jour', 'good');
     close();
     render();
   });
-
-  if (!isNew) {
-    $('#empDel').addEventListener('click', () => {
-      if (!confirm(`Supprimer ${e.prenom} ${e.nom} ? Cette action est irréversible.`)) return;
-      state.employees = state.employees.filter(x => x.id !== id);
-      fbSave('employees', state.employees);
-      toast('Salarié supprimé', '');
-      close();
-      render();
-    });
-  }
 }
 
+// ── CONTRATS TAB ──
+function empTabContrats(n) {
+  const avenants = n.avenants || [];
+  return `
+    <div class="panel">
+      <div class="panel-head"><h3>Contrat en cours</h3></div>
+      <div class="panel-body">
+        ${kvRow('Type', n.contrat || 'Non renseigné')}
+        ${kvRow('Début du contrat', n.contratDebut ? fmtDateShort(n.contratDebut) : 'Non renseigné')}
+        ${kvRow('Fin du contrat', n.contratFin ? fmtDateShort(n.contratFin) : (n.contrat==='CDI'?'Indéterminée':'Non renseigné'))}
+        ${kvRow('Période d\'essai', n.periodeEssaiJours ? `${n.periodeEssaiJours} jours` : 'Non renseigné')}
+        ${kvRow('Poste', n.poste || 'Non renseigné')}
+        ${kvRow('Rémunération mensuelle brute', n.remuneration ? `${n.remuneration} €` : 'Non renseigné')}
+        ${kvRow('Taux horaire', n.taux ? `${n.taux} €/h` : 'Non renseigné')}
+        ${kvRow('Durée de travail hebdomadaire', `${n.heures || 0}h`)}
+        ${kvRow('Nb. de jours travaillés par semaine', `${n.joursTravailles || 5} jours`)}
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top:14px;">
+      <div class="panel-head">
+        <h3>Tous les contrats et avenants</h3>
+        <button class="btn-sec" id="addAvenant">+ Nouvel avenant</button>
+      </div>
+      <div class="panel-body ${avenants.length?'nopad':''}">
+        ${avenants.length === 0 ? '<div class="text-mute" style="text-align:center;padding:18px 0;font-size:13px;">Aucun avenant enregistré</div>' : `
+          <table class="tbl">
+            <thead><tr><th>Date</th><th>Type</th><th>Modification</th><th>Détail</th><th></th></tr></thead>
+            <tbody>
+              ${avenants.map((a,i) => `
+                <tr>
+                  <td class="mono">${a.date ? fmtDateShort(a.date) : '—'}</td>
+                  <td>${esc(a.type||'—')}</td>
+                  <td>${esc(a.modif||'—')}</td>
+                  <td class="text-mute">${esc(a.detail||'—')}</td>
+                  <td><button class="btn-ghost" data-del-avenant="${i}">Supprimer</button></td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        `}
+      </div>
+    </div>
+
+    <div class="row" style="justify-content:center;margin-top:18px;">
+      <button class="btn-pri" id="editContrat" style="width:auto;padding:10px 18px;">✎ Modifier le contrat en cours</button>
+    </div>
+  `;
+}
+
+function bindEmpTabContrats() {
+  $('#editContrat').addEventListener('click', () => openContratEditor());
+  const addBtn = $('#addAvenant');
+  if (addBtn) addBtn.addEventListener('click', () => openAvenantEditor());
+  $$('[data-del-avenant]').forEach(b => b.addEventListener('click', ev => {
+    const i = parseInt(ev.currentTarget.dataset.delAvenant);
+    if (!confirm('Supprimer cet avenant ?')) return;
+    const e = state.employees.find(x => x.id === state.empDetail);
+    const avenants = [...(e.avenants||[])];
+    avenants.splice(i, 1);
+    const updated = { ...e, avenants };
+    state.employees = state.employees.map(x => x.id === e.id ? updated : x);
+    fbSave('employees', state.employees);
+    toast('Avenant supprimé', '');
+    render();
+  }));
+}
+
+function openContratEditor() {
+  const e = state.employees.find(x => x.id === state.empDetail);
+  const n = normEmp(e);
+  const body = `
+    <div class="form-grid">
+      <div class="field"><label class="field-label">Type de contrat</label>
+        <select class="input" id="cType">
+          ${['CDI','CDD','Extra','Apprenti','Stage','Interim'].map(c => `<option ${c===n.contrat?'selected':''}>${c}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field"><label class="field-label">Poste</label><input class="input" id="cPoste" value="${esc(n.poste)}"></div>
+      <div class="field"><label class="field-label">Date de début</label><input class="input" id="cDebut" type="date" value="${esc(n.contratDebut)}"></div>
+      <div class="field"><label class="field-label">Date de fin (laisser vide pour CDI)</label><input class="input" id="cFin" type="date" value="${esc(n.contratFin)}"></div>
+      <div class="field"><label class="field-label">Période d'essai (jours)</label><input class="input mono" id="cEssai" type="number" value="${n.periodeEssaiJours||60}"></div>
+      <div class="field"><label class="field-label">Heures hebdo</label><input class="input mono" id="cHeures" type="number" value="${n.heures||35}"></div>
+      <div class="field"><label class="field-label">Jours travaillés / semaine</label><input class="input mono" id="cJours" type="number" min="1" max="7" value="${n.joursTravailles||5}"></div>
+      <div class="field"><label class="field-label">Taux horaire (€)</label><input class="input mono" id="cTaux" type="number" step="0.01" value="${n.taux||12}"></div>
+      <div class="field full"><label class="field-label">Rémunération mensuelle brute (€)</label><input class="input mono" id="cRem" type="number" step="0.01" value="${n.remuneration||0}"></div>
+    </div>
+  `;
+  const footer = `
+    <div class="spacer"></div>
+    <button class="btn-sec" data-close>Annuler</button>
+    <button class="btn-pri" id="cSave" style="width:auto;padding:10px 18px;">Enregistrer</button>
+  `;
+  const { close } = openModal({ title: 'Modifier le contrat', body, footer });
+  $('#cSave').addEventListener('click', () => {
+    const updated = {
+      ...e,
+      contrat: $('#cType').value,
+      poste: $('#cPoste').value.trim(),
+      contratDebut: $('#cDebut').value,
+      contratFin: $('#cFin').value,
+      periodeEssaiJours: parseInt($('#cEssai').value) || 60,
+      heures: parseInt($('#cHeures').value) || 35,
+      joursTravailles: parseInt($('#cJours').value) || 5,
+      taux: parseFloat($('#cTaux').value) || 12,
+      remuneration: parseFloat($('#cRem').value) || 0,
+    };
+    state.employees = state.employees.map(x => x.id === e.id ? updated : x);
+    fbSave('employees', state.employees);
+    toast('Contrat mis à jour', 'good');
+    close();
+    render();
+  });
+}
+
+function openAvenantEditor() {
+  const body = `
+    <div class="form-grid">
+      <div class="field"><label class="field-label">Date</label><input class="input" id="aDate" type="date" value="${dateISO(new Date())}"></div>
+      <div class="field"><label class="field-label">Type</label>
+        <select class="input" id="aType">
+          <option>Changement d'horaire</option>
+          <option>Augmentation</option>
+          <option>Changement de poste</option>
+          <option>Renouvellement CDD</option>
+          <option>Autre</option>
+        </select>
+      </div>
+      <div class="field full"><label class="field-label">Modification (résumé court)</label><input class="input" id="aModif" placeholder="ex: passage 35h → 39h"></div>
+      <div class="field full"><label class="field-label">Détail (optionnel)</label><textarea class="input" id="aDetail" rows="3"></textarea></div>
+    </div>
+  `;
+  const footer = `<div class="spacer"></div><button class="btn-sec" data-close>Annuler</button><button class="btn-pri" id="aSave" style="width:auto;padding:10px 18px;">Ajouter</button>`;
+  const { close } = openModal({ title: 'Nouvel avenant', body, footer });
+  $('#aSave').addEventListener('click', () => {
+    const e = state.employees.find(x => x.id === state.empDetail);
+    const newAv = {
+      date: $('#aDate').value,
+      type: $('#aType').value,
+      modif: $('#aModif').value.trim(),
+      detail: $('#aDetail').value.trim(),
+    };
+    if (!newAv.modif) { toast('Saisis au moins la modification', 'error'); return; }
+    const avenants = [...(e.avenants||[]), newAv].sort((a,b) => (b.date||'').localeCompare(a.date||''));
+    const updated = { ...e, avenants };
+    state.employees = state.employees.map(x => x.id === e.id ? updated : x);
+    fbSave('employees', state.employees);
+    toast('Avenant ajouté', 'good');
+    close();
+    render();
+  });
+}
+
+// ── TEMPS & PLANIF TAB ──
+function empTabTemps(n) {
+  const now = new Date();
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  let monthH = 0;
+  for (let d = new Date(monthStart); d <= new Date(now.getFullYear(), now.getMonth()+1, 0); d = addDays(d, 1)) {
+    const wk = weekKey(d);
+    const dayIdx = (d.getDay() + 6) % 7;
+    (state.shifts[`${n.id}_${dayIdx}_${wk}`] || []).forEach(s => monthH += shiftHours(s));
+  }
+  return `
+    <div class="info-grid">
+      <div class="panel">
+        <div class="panel-head"><h3>Temps de travail</h3></div>
+        <div class="panel-body">
+          ${kvRow('Mois en cours', `${monthH.toFixed(1)} h`)}
+          ${kvRow('Heures contractuelles hebdo', `${n.heures||0} h`)}
+          ${kvRow('Estimation mensuelle contractuelle', `~${((n.heures||0) * 4.33).toFixed(0)} h`)}
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h3>Disponibilités hebdomadaires</h3></div>
+        <div class="panel-body" style="padding:0;">
+          ${DAYS.map((d,i) => `
+            <div class="row" style="padding:10px 16px;border-bottom:1px solid var(--c-line-2);">
+              <span style="flex:1;font-weight:500;">${d}</span>
+              <span class="chip ${n.dispos?.[i]!==false?'good':''}" style="font-size:11px;">${n.dispos?.[i]!==false?'✓ Disponible':'✗ Indisponible'}</span>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+    </div>
+    <div class="row" style="justify-content:center;margin-top:18px;">
+      <button class="btn-pri" id="editDispos" style="width:auto;padding:10px 18px;">✎ Modifier les disponibilités</button>
+    </div>
+  `;
+}
+
+function bindEmpTabTemps() {
+  $('#editDispos').addEventListener('click', () => openDisposEditor());
+}
+
+function openDisposEditor() {
+  const e = state.employees.find(x => x.id === state.empDetail);
+  const n = normEmp(e);
+  const body = `
+    <div class="text-mute" style="margin-bottom:10px;font-size:12.5px;">Décoche les jours où le salarié n'est pas disponible</div>
+    ${DAYS.map((d,i) => `
+      <label class="row" style="padding:10px 0;border-bottom:1px solid var(--c-line-2);cursor:pointer;">
+        <input type="checkbox" id="d${i}" ${n.dispos[i]!==false?'checked':''} style="margin-right:10px;">
+        <span style="flex:1;font-weight:500;">${d}</span>
+      </label>
+    `).join('')}
+  `;
+  const footer = `<div class="spacer"></div><button class="btn-sec" data-close>Annuler</button><button class="btn-pri" id="dSave" style="width:auto;padding:10px 18px;">Enregistrer</button>`;
+  const { close } = openModal({ title: 'Disponibilités', body, footer });
+  $('#dSave').addEventListener('click', () => {
+    const dispos = {};
+    for (let i = 0; i < 7; i++) dispos[i] = $('#d'+i).checked;
+    const updated = { ...e, dispos };
+    state.employees = state.employees.map(x => x.id === e.id ? updated : x);
+    fbSave('employees', state.employees);
+    toast('Disponibilités mises à jour', 'good');
+    close();
+    render();
+  });
+}
+
+// ── CONGÉS TAB ──
+function empTabConges(n) {
+  const cpPrisAuto = computeCpPris(n.id);
+  const soldeN = (n.cpAcquisN||0) - (n.cpPrisN||0);
+  const soldeNm1 = (n.cpAcquisNm1||0) - (n.cpPrisNm1||0);
+  const total = soldeN + soldeNm1;
+  const reqs = Object.values(state.absenceRequests||{}).filter(r => r && r.empId === n.id);
+  return `
+    <div class="cp-grid">
+      <div class="cp-card">
+        <div class="cp-card-label">Solde CP total</div>
+        <div class="cp-card-value">${total.toFixed(1)} j</div>
+        <div class="cp-card-sub">N: ${soldeN.toFixed(1)} · N-1: ${soldeNm1.toFixed(1)}</div>
+      </div>
+      <div class="cp-card">
+        <div class="cp-card-label">Repos compensateur</div>
+        <div class="cp-card-value">${(n.reposCompensateur||0)} h</div>
+      </div>
+      <div class="cp-card">
+        <div class="cp-card-label">Récupération jours fériés</div>
+        <div class="cp-card-value">${(n.recupJoursFeries||0)} h</div>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top:14px;">
+      <div class="panel-head"><h3>Compteurs CP — Détail</h3></div>
+      <div class="panel-body nopad">
+        <table class="tbl">
+          <thead><tr><th>Période</th><th>Acquis</th><th>Pris</th><th>Solde</th></tr></thead>
+          <tbody>
+            <tr><td>N-1 (année précédente)</td><td class="mono tabular">${(n.cpAcquisNm1||0).toFixed(1)}</td><td class="mono tabular">${(n.cpPrisNm1||0).toFixed(1)}</td><td class="mono tabular"><strong>${soldeNm1.toFixed(1)}</strong></td></tr>
+            <tr><td>N (année en cours)</td><td class="mono tabular">${(n.cpAcquisN||0).toFixed(1)}</td><td class="mono tabular">${(n.cpPrisN||0).toFixed(1)} <span class="text-mute" style="font-size:10.5px;">(${cpPrisAuto} auto-détectés)</span></td><td class="mono tabular"><strong>${soldeN.toFixed(1)}</strong></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top:14px;">
+      <div class="panel-head"><h3>Demandes d'absence</h3></div>
+      <div class="panel-body ${reqs.length?'nopad':''}">
+        ${reqs.length === 0 ? '<div class="text-mute" style="text-align:center;padding:18px 0;font-size:13px;">Aucune demande</div>' : `
+          <table class="tbl">
+            <thead><tr><th>Date(s)</th><th>Jours</th><th>Type</th><th>Statut</th></tr></thead>
+            <tbody>
+              ${reqs.sort((a,b) => (b.createdAt||'').localeCompare(a.createdAt||'')).map(r => `
+                <tr>
+                  <td>${fmtDateShort(r.dateStart)} → ${fmtDateShort(r.dateEnd)}</td>
+                  <td class="mono">${r.nbJours || '?'}</td>
+                  <td>${esc(LEAVE_TYPES[r.type]?.label || r.type)}</td>
+                  <td>${reqStatusChip(r.status)}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        `}
+      </div>
+    </div>
+
+    <div class="row" style="justify-content:center;margin-top:18px;gap:10px;">
+      <button class="btn-sec" id="editCp">✎ Modifier les compteurs CP</button>
+      <button class="btn-pri" id="addAbsence" style="width:auto;padding:10px 18px;">+ Ajouter une absence</button>
+    </div>
+  `;
+}
+
+function bindEmpTabConges() {
+  $('#editCp').addEventListener('click', () => openCpEditor());
+  $('#addAbsence').addEventListener('click', () => openAbsenceCreator(state.empDetail));
+}
+
+function openCpEditor() {
+  const e = state.employees.find(x => x.id === state.empDetail);
+  const n = normEmp(e);
+  const body = `
+    <div class="modal-section-title">N-1 (année précédente)</div>
+    <div class="form-grid">
+      <div class="field"><label class="field-label">CP acquis N-1</label><input class="input mono" id="cAcq1" type="number" step="0.5" value="${n.cpAcquisNm1||0}"></div>
+      <div class="field"><label class="field-label">CP pris N-1</label><input class="input mono" id="cPri1" type="number" step="0.5" value="${n.cpPrisNm1||0}"></div>
+    </div>
+    <div class="modal-section-title">N (année en cours)</div>
+    <div class="form-grid">
+      <div class="field"><label class="field-label">CP acquis N</label><input class="input mono" id="cAcq" type="number" step="0.5" value="${n.cpAcquisN||0}"></div>
+      <div class="field"><label class="field-label">CP pris N (manuel)</label><input class="input mono" id="cPri" type="number" step="0.5" value="${n.cpPrisN||0}"></div>
+    </div>
+    <div class="modal-section-title">Autres compteurs</div>
+    <div class="form-grid">
+      <div class="field"><label class="field-label">Repos compensateur (heures)</label><input class="input mono" id="cRC" type="number" step="0.5" value="${n.reposCompensateur||0}"></div>
+      <div class="field"><label class="field-label">Récup jours fériés (heures)</label><input class="input mono" id="cRJF" type="number" step="0.5" value="${n.recupJoursFeries||0}"></div>
+    </div>
+  `;
+  const footer = `<div class="spacer"></div><button class="btn-sec" data-close>Annuler</button><button class="btn-pri" id="cpSave" style="width:auto;padding:10px 18px;">Enregistrer</button>`;
+  const { close } = openModal({ title: 'Compteurs CP', body, footer });
+  $('#cpSave').addEventListener('click', () => {
+    const updated = {
+      ...e,
+      cpAcquisNm1: parseFloat($('#cAcq1').value) || 0,
+      cpPrisNm1: parseFloat($('#cPri1').value) || 0,
+      cpAcquisN: parseFloat($('#cAcq').value) || 0,
+      cpPrisN: parseFloat($('#cPri').value) || 0,
+      reposCompensateur: parseFloat($('#cRC').value) || 0,
+      recupJoursFeries: parseFloat($('#cRJF').value) || 0,
+    };
+    state.employees = state.employees.map(x => x.id === e.id ? updated : x);
+    fbSave('employees', state.employees);
+    toast('Compteurs mis à jour', 'good');
+    close();
+    render();
+  });
+}
+
+// ── DOCS TAB ──
+function empTabDocs(n) {
+  return `
+    <div class="panel">
+      <div class="panel-body" style="text-align:center;padding:32px 18px;">
+        <div style="font-size:36px;margin-bottom:8px;">📁</div>
+        <div style="font-weight:500;margin-bottom:4px;">Stockage de documents</div>
+        <div class="text-mute" style="font-size:13px;max-width:420px;margin:6px auto 16px;">
+          Cette section permettra de stocker les contrats, fiches de paie, titres de séjour, et autres documents du salarié.
+        </div>
+        <span class="chip" style="font-size:11px;">Disponible en V2 partie 4 (Firebase Storage)</span>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top:14px;">
+      <div class="panel-head"><h3>Titre de séjour</h3></div>
+      <div class="panel-body">
+        ${n.travailleurEtranger ? `
+          ${kvRow('Type de document', n.titreSejourType || 'Non renseigné')}
+          ${kvRow('Numéro de document', n.titreSejourNumero || 'Non renseigné')}
+          ${kvRow('Début de validité', n.titreSejourDebut ? fmtDateShort(n.titreSejourDebut) : 'Non renseigné')}
+          ${kvRow('Fin de validité', n.titreSejourFin ? fmtDateShort(n.titreSejourFin) : 'Non renseigné')}
+        ` : '<div class="text-mute" style="text-align:center;padding:18px 0;font-size:13px;">Le salarié n\'est pas marqué comme travailleur étranger</div>'}
+      </div>
+    </div>
+  `;
+}
+
+// ── ROLE TAB ──
+function empTabRole(n) {
+  return `
+    <div class="panel">
+      <div class="panel-head"><h3>Compte</h3></div>
+      <div class="panel-body">
+        ${kvRow('Username', n.username || 'Non renseigné')}
+        ${kvRow('Code PIN', n.code || '—')}
+        ${kvRow('Accès au compte', n.peutSeConnecter !== false ? 'Activé' : 'Désactivé')}
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top:14px;">
+      <div class="panel-head"><h3>Statut</h3></div>
+      <div class="panel-body">
+        ${kvRow('Statut', n.statut || 'Actif')}
+        ${kvRow('Date de sortie', n.dateSortie ? fmtDateShort(n.dateSortie) : '—')}
+        ${kvRow('Motif de sortie', n.motifSortie || '—')}
+        ${kvRow('Travailleur étranger', n.travailleurEtranger ? 'Oui' : 'Non')}
+      </div>
+    </div>
+
+    <div class="row" style="justify-content:center;margin-top:18px;gap:10px;">
+      <button class="btn-sec" id="editRole">✎ Modifier le compte</button>
+      <button class="btn-sec" id="markExit">Enregistrer une sortie</button>
+      <button class="btn-danger" id="delEmp">Supprimer le salarié</button>
+    </div>
+  `;
+}
+
+function bindEmpTabRole() {
+  $('#editRole').addEventListener('click', () => openRoleEditor());
+  $('#markExit').addEventListener('click', () => openExitEditor());
+  $('#delEmp').addEventListener('click', () => {
+    const e = state.employees.find(x => x.id === state.empDetail);
+    if (!confirm(`Supprimer ${e.prenom} ${e.nom} ? Cette action est irréversible.`)) return;
+    state.employees = state.employees.filter(x => x.id !== state.empDetail);
+    fbSave('employees', state.employees);
+    state.empDetail = null;
+    toast('Salarié supprimé', '');
+    render();
+  });
+}
+
+function openRoleEditor() {
+  const e = state.employees.find(x => x.id === state.empDetail);
+  const n = normEmp(e);
+  const body = `
+    <div class="form-grid">
+      <div class="field"><label class="field-label">Username</label><input class="input mono" id="rUser" value="${esc(n.username)}"></div>
+      <div class="field"><label class="field-label">Code PIN</label><input class="input mono" id="rCode" value="${esc(String(n.code))}"></div>
+      <div class="field full"><label class="field-label"><input type="checkbox" id="rConnect" ${n.peutSeConnecter!==false?'checked':''}> Le salarié peut accéder à son compte</label></div>
+      <div class="field full"><label class="field-label"><input type="checkbox" id="rForeign" ${n.travailleurEtranger?'checked':''}> Travailleur étranger</label></div>
+    </div>
+    <div id="foreignWrap" style="${n.travailleurEtranger?'':'display:none;'}">
+      <div class="modal-section-title">Titre de séjour</div>
+      <div class="form-grid">
+        <div class="field"><label class="field-label">Type</label><input class="input" id="rTSType" value="${esc(n.titreSejourType)}" placeholder="ex: Carte de séjour"></div>
+        <div class="field"><label class="field-label">Numéro</label><input class="input mono" id="rTSNum" value="${esc(n.titreSejourNumero)}"></div>
+        <div class="field"><label class="field-label">Début validité</label><input class="input" id="rTSDeb" type="date" value="${esc(n.titreSejourDebut)}"></div>
+        <div class="field"><label class="field-label">Fin validité</label><input class="input" id="rTSFin" type="date" value="${esc(n.titreSejourFin)}"></div>
+      </div>
+    </div>
+  `;
+  const footer = `<div class="spacer"></div><button class="btn-sec" data-close>Annuler</button><button class="btn-pri" id="rSave" style="width:auto;padding:10px 18px;">Enregistrer</button>`;
+  const { close } = openModal({ title: 'Compte & permissions', body, footer });
+  $('#rForeign').addEventListener('change', ev => {
+    $('#foreignWrap').style.display = ev.target.checked ? '' : 'none';
+  });
+  $('#rSave').addEventListener('click', () => {
+    const updated = {
+      ...e,
+      username: $('#rUser').value.trim().toLowerCase(),
+      code: $('#rCode').value.trim(),
+      peutSeConnecter: $('#rConnect').checked,
+      travailleurEtranger: $('#rForeign').checked,
+      titreSejourType: $('#rTSType').value.trim(),
+      titreSejourNumero: $('#rTSNum').value.trim(),
+      titreSejourDebut: $('#rTSDeb').value,
+      titreSejourFin: $('#rTSFin').value,
+    };
+    state.employees = state.employees.map(x => x.id === e.id ? updated : x);
+    fbSave('employees', state.employees);
+    toast('Compte mis à jour', 'good');
+    close();
+    render();
+  });
+}
+
+function openExitEditor() {
+  const e = state.employees.find(x => x.id === state.empDetail);
+  const n = normEmp(e);
+  const body = `
+    <div class="form-grid">
+      <div class="field"><label class="field-label">Date de sortie</label><input class="input" id="eDate" type="date" value="${esc(n.dateSortie)||dateISO(new Date())}"></div>
+      <div class="field"><label class="field-label">Motif</label>
+        <select class="input" id="eMotif">
+          <option value="">—</option>
+          <option ${n.motifSortie==='Démission'?'selected':''}>Démission</option>
+          <option ${n.motifSortie==='Fin de CDD'?'selected':''}>Fin de CDD</option>
+          <option ${n.motifSortie==='Licenciement'?'selected':''}>Licenciement</option>
+          <option ${n.motifSortie==='Rupture conventionnelle'?'selected':''}>Rupture conventionnelle</option>
+          <option ${n.motifSortie==="Fin de période d'essai"?'selected':''}>Fin de période d'essai</option>
+          <option ${n.motifSortie==='Autre'?'selected':''}>Autre</option>
+        </select>
+      </div>
+      <div class="field full" style="margin-top:8px;">
+        <label class="field-label"><input type="checkbox" id="eInactif" checked> Marquer le salarié comme inactif</label>
+      </div>
+    </div>
+  `;
+  const footer = `<div class="spacer"></div><button class="btn-sec" data-close>Annuler</button><button class="btn-pri" id="eSave" style="width:auto;padding:10px 18px;">Enregistrer la sortie</button>`;
+  const { close } = openModal({ title: 'Enregistrer une sortie', body, footer });
+  $('#eSave').addEventListener('click', () => {
+    const updated = {
+      ...e,
+      dateSortie: $('#eDate').value,
+      motifSortie: $('#eMotif').value,
+      statut: $('#eInactif').checked ? 'Inactif' : e.statut,
+    };
+    state.employees = state.employees.map(x => x.id === e.id ? updated : x);
+    fbSave('employees', state.employees);
+    toast('Sortie enregistrée', 'good');
+    close();
+    render();
+  });
+}
+
+// ─────────── ABSENCE REQUESTS ───────────
+function reqStatusChip(s) {
+  if (s === 'approved') return '<span class="chip good">✓ Validée</span>';
+  if (s === 'rejected') return '<span class="chip alert">✗ Refusée</span>';
+  return '<span class="chip warn">⏳ En attente</span>';
+}
+
+function pageAbsenceRequests() {
+  const all = Object.entries(state.absenceRequests || {}).map(([id,r]) => ({...r, id}));
+  const tab = state.reqTab || 'pending';
+  const filtered = all.filter(r => r.status === tab);
+  filtered.sort((a,b) => (b.createdAt||'').localeCompare(a.createdAt||''));
+
+  return `
+    <div class="page-head">
+      <div>
+        <div class="uppercase-eyebrow">Suivi RH</div>
+        <h1 class="h-1">Demandes d'absence</h1>
+      </div>
+    </div>
+
+    <div class="emp-tabs" style="margin-bottom:14px;">
+      <button class="emp-tab ${tab==='pending'?'active':''}" data-req-tab="pending">En attente (${all.filter(r=>r.status==='pending').length})</button>
+      <button class="emp-tab ${tab==='approved'?'active':''}" data-req-tab="approved">Validées (${all.filter(r=>r.status==='approved').length})</button>
+      <button class="emp-tab ${tab==='rejected'?'active':''}" data-req-tab="rejected">Refusées (${all.filter(r=>r.status==='rejected').length})</button>
+    </div>
+
+    <div class="panel">
+      <div class="panel-body ${filtered.length?'nopad':''}">
+        ${filtered.length === 0 ? `<div class="text-mute" style="text-align:center;padding:32px 0;font-size:13px;">Aucune demande ${tab==='pending'?'en attente':tab==='approved'?'validée':'refusée'}</div>` : `
+          <table class="tbl">
+            <thead>
+              <tr>
+                <th>Salarié</th>
+                <th>Type</th>
+                <th>Dates</th>
+                <th>Jours</th>
+                <th>Demandée le</th>
+                <th>Motif</th>
+                ${tab==='pending'?'<th>Actions</th>':'<th>Décision</th>'}
+              </tr>
+            </thead>
+            <tbody>
+              ${filtered.map(r => {
+                const emp = state.employees.find(e => e.id === r.empId);
+                const lt = LEAVE_TYPES[r.type];
+                return `
+                  <tr>
+                    <td><div class="emp-cell"><div class="av-emp sm">${emp?initials(emp):'?'}</div><div class="emp-cell-name">${emp?esc(emp.prenom+' '+emp.nom):'(inconnu)'}</div></div></td>
+                    <td>${esc(lt?.label||r.type)}</td>
+                    <td>${fmtDateShort(r.dateStart)} → ${fmtDateShort(r.dateEnd)}</td>
+                    <td class="mono">${r.nbJours||'?'}</td>
+                    <td class="mono" style="font-size:11.5px;">${r.createdAt?new Date(r.createdAt).toLocaleDateString('fr-FR'):'—'}</td>
+                    <td class="text-mute" style="font-size:12px;">${esc(r.motif||'—')}</td>
+                    ${tab==='pending' ? `
+                      <td>
+                        <button class="btn-sec" data-approve="${r.id}" style="padding:5px 10px;font-size:11.5px;">✓ Valider</button>
+                        <button class="btn-sec" data-reject="${r.id}" style="padding:5px 10px;font-size:11.5px;">✗ Refuser</button>
+                      </td>
+                    ` : `
+                      <td class="text-mute" style="font-size:11.5px;">${r.decidedAt?new Date(r.decidedAt).toLocaleDateString('fr-FR'):'—'}${r.commentAdmin?'<br><em>'+esc(r.commentAdmin)+'</em>':''}</td>
+                    `}
+                  </tr>
+                `;
+              }).join('')}
+            </tbody>
+          </table>
+        `}
+      </div>
+    </div>
+  `;
+}
+
+function bindAbsenceRequests() {
+  $$('[data-req-tab]').forEach(b => b.addEventListener('click', ev => {
+    state.reqTab = ev.currentTarget.dataset.reqTab;
+    render();
+  }));
+  $$('[data-approve]').forEach(b => b.addEventListener('click', ev => {
+    const id = ev.currentTarget.dataset.approve;
+    approveAbsenceRequest(id);
+  }));
+  $$('[data-reject]').forEach(b => b.addEventListener('click', ev => {
+    const id = ev.currentTarget.dataset.reject;
+    rejectAbsenceRequest(id);
+  }));
+}
+
+function approveAbsenceRequest(id) {
+  const r = state.absenceRequests[id];
+  if (!r) return;
+  if (!confirm(`Valider cette demande ?\n\nLes jours seront automatiquement marqués comme "${LEAVE_TYPES[r.type]?.label||r.type}" sur le planning.`)) return;
+
+  // Inject shifts as leave on each day between dateStart and dateEnd
+  const start = new Date(r.dateStart);
+  const end = new Date(r.dateEnd);
+  const updates = {};
+  for (let d = new Date(start); d <= end; d = addDays(d, 1)) {
+    const wk = weekKey(d);
+    const dayIdx = (d.getDay() + 6) % 7;
+    const key = `${r.empId}_${dayIdx}_${wk}`;
+    const newSh = [{ leaveType: r.type, label: LEAVE_TYPES[r.type]?.label || r.type }];
+    state.shifts[key] = newSh;
+    updates[`shifts/${key}`] = newSh;
+  }
+  // Update request status
+  const updatedReq = { ...r, status: 'approved', decidedAt: new Date().toISOString(), decidedBy: 'admin' };
+  state.absenceRequests[id] = updatedReq;
+  updates[`absenceRequests/${id}`] = updatedReq;
+  if (db) db.ref().update(updates).catch(e => console.warn(e));
+  toast('Demande validée et planning mis à jour', 'good');
+  render();
+}
+
+function rejectAbsenceRequest(id) {
+  const r = state.absenceRequests[id];
+  if (!r) return;
+  const reason = prompt('Motif du refus (optionnel) :');
+  if (reason === null) return;
+  const updated = { ...r, status: 'rejected', decidedAt: new Date().toISOString(), decidedBy: 'admin', commentAdmin: reason };
+  state.absenceRequests[id] = updated;
+  fbSave(`absenceRequests/${id}`, updated);
+  toast('Demande refusée', '');
+  render();
+}
+
+function openAbsenceCreator(empId) {
+  const e = state.employees.find(x => x.id === empId);
+  const body = `
+    <div class="form-grid">
+      <div class="field"><label class="field-label">Type</label>
+        <select class="input" id="abType">
+          ${Object.entries(LEAVE_TYPES).map(([k,v]) => `<option value="${k}">${esc(v.label)}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field"><label class="field-label">Date de début</label><input class="input" id="abStart" type="date" value="${dateISO(new Date())}"></div>
+      <div class="field"><label class="field-label">Date de fin</label><input class="input" id="abEnd" type="date" value="${dateISO(new Date())}"></div>
+      <div class="field full"><label class="field-label">Motif (optionnel)</label><textarea class="input" id="abMotif" rows="2"></textarea></div>
+      <div class="field full text-mute" style="font-size:12px;">Cette absence sera automatiquement validée et injectée dans le planning.</div>
+    </div>
+  `;
+  const footer = `<div class="spacer"></div><button class="btn-sec" data-close>Annuler</button><button class="btn-pri" id="abSave" style="width:auto;padding:10px 18px;">Ajouter</button>`;
+  const { close } = openModal({ title: `Absence pour ${e.prenom} ${e.nom}`, body, footer });
+  $('#abSave').addEventListener('click', () => {
+    const start = $('#abStart').value;
+    const endVal = $('#abEnd').value;
+    if (!start || !endVal) { toast('Renseigne les dates', 'error'); return; }
+    if (endVal < start) { toast('Date de fin avant date de début', 'error'); return; }
+    const sD = new Date(start), eD = new Date(endVal);
+    const nbJours = Math.round((eD - sD)/86400000) + 1;
+    const id = 'r' + Date.now();
+    const r = {
+      empId, type: $('#abType').value,
+      dateStart: start, dateEnd: endVal,
+      motif: $('#abMotif').value.trim(),
+      nbJours,
+      status: 'pending', createdAt: new Date().toISOString(),
+    };
+    state.absenceRequests[id] = r;
+    fbSave(`absenceRequests/${id}`, r);
+    close();
+    approveAbsenceRequest(id);
+  });
+}
+
+// ─────────── COMPTEURS CP ───────────
+function pageCpCompteurs() {
+  const actives = state.employees.filter(e => e.statut === 'Actif');
+  return `
+    <div class="page-head">
+      <div>
+        <div class="uppercase-eyebrow">Suivi RH</div>
+        <h1 class="h-1">Compteurs de congés payés</h1>
+      </div>
+      <div class="page-actions">
+        <button class="btn-sec" id="exportCp">↓ Exporter CSV</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-body nopad" style="overflow-x:auto;">
+        <table class="tbl">
+          <thead>
+            <tr>
+              <th>Salarié</th>
+              <th class="mono">Acquis N-1</th>
+              <th class="mono">Pris N-1</th>
+              <th class="mono">Solde N-1</th>
+              <th class="mono">Acquis N</th>
+              <th class="mono">Pris N</th>
+              <th class="mono">Solde N</th>
+              <th class="mono">Solde total</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            ${actives.map(e => {
+              const n = normEmp(e);
+              const sNm1 = (n.cpAcquisNm1||0) - (n.cpPrisNm1||0);
+              const sN = (n.cpAcquisN||0) - (n.cpPrisN||0);
+              const total = sNm1 + sN;
+              return `
+                <tr>
+                  <td><div class="emp-cell"><div class="av-emp sm">${initials(e)}</div><span class="emp-cell-name">${esc(e.prenom)} ${esc(e.nom)}</span></div></td>
+                  <td class="mono tabular">${(n.cpAcquisNm1||0).toFixed(1)}</td>
+                  <td class="mono tabular">${(n.cpPrisNm1||0).toFixed(1)}</td>
+                  <td class="mono tabular"><strong>${sNm1.toFixed(1)}</strong></td>
+                  <td class="mono tabular">${(n.cpAcquisN||0).toFixed(1)}</td>
+                  <td class="mono tabular">${(n.cpPrisN||0).toFixed(1)}</td>
+                  <td class="mono tabular"><strong>${sN.toFixed(1)}</strong></td>
+                  <td class="mono tabular"><strong>${total.toFixed(1)}</strong></td>
+                  <td><button class="btn-ghost" data-view-emp-cp="${e.id}">Modifier</button></td>
+                </tr>
+              `;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+function bindCpCompteurs() {
+  $('#exportCp').addEventListener('click', () => exportCpCSV());
+  $$('[data-view-emp-cp]').forEach(b => b.addEventListener('click', ev => {
+    state.empDetail = parseInt(ev.currentTarget.dataset.viewEmpCp);
+    state.empTab = 'conges';
+    state.page = 'employees';
+    render();
+  }));
+}
+
+function exportCpCSV() {
+  const lines = ['Salarié;Acquis N-1;Pris N-1;Solde N-1;Acquis N;Pris N;Solde N;Solde total'];
+  state.employees.filter(e => e.statut === 'Actif').forEach(e => {
+    const n = normEmp(e);
+    const sNm1 = (n.cpAcquisNm1||0) - (n.cpPrisNm1||0);
+    const sN = (n.cpAcquisN||0) - (n.cpPrisN||0);
+    lines.push([
+      csvEsc(`${e.prenom} ${e.nom}`),
+      (n.cpAcquisNm1||0).toFixed(1).replace('.', ','),
+      (n.cpPrisNm1||0).toFixed(1).replace('.', ','),
+      sNm1.toFixed(1).replace('.', ','),
+      (n.cpAcquisN||0).toFixed(1).replace('.', ','),
+      (n.cpPrisN||0).toFixed(1).replace('.', ','),
+      sN.toFixed(1).replace('.', ','),
+      (sNm1+sN).toFixed(1).replace('.', ','),
+    ].join(';'));
+  });
+  const blob = new Blob(['\ufeff' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = `compteurs_cp_${dateISO(new Date())}.csv`;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  toast('CSV téléchargé', 'good');
+}
+
+// ─────────── SUIVI RH (Entrées, Sorties, Fins essai, Profils incomplets) ───────────
+function pageRH() {
+  const tab = state.rhTab || 'entries';
+  return `
+    <div class="page-head">
+      <div>
+        <div class="uppercase-eyebrow">Suivi RH</div>
+        <h1 class="h-1">${tab==='entries'?'Entrées':tab==='exits'?'Sorties':tab==='essai'?'Fins de période d\'essai':'Profils incomplets'}</h1>
+      </div>
+    </div>
+
+    <div class="emp-tabs" style="margin-bottom:14px;">
+      <button class="emp-tab ${tab==='entries'?'active':''}" data-rh-tab="entries">Entrées</button>
+      <button class="emp-tab ${tab==='exits'?'active':''}" data-rh-tab="exits">Sorties</button>
+      <button class="emp-tab ${tab==='essai'?'active':''}" data-rh-tab="essai">Fins période essai</button>
+      <button class="emp-tab ${tab==='incomplete'?'active':''}" data-rh-tab="incomplete">Profils incomplets</button>
+    </div>
+
+    ${tab === 'entries' ? rhEntries() :
+      tab === 'exits' ? rhExits() :
+      tab === 'essai' ? rhEssai() :
+      rhIncomplete()}
+  `;
+}
+
+function bindRH() {
+  $$('[data-rh-tab]').forEach(b => b.addEventListener('click', ev => {
+    state.rhTab = ev.currentTarget.dataset.rhTab;
+    render();
+  }));
+  $$('[data-rh-view]').forEach(b => b.addEventListener('click', ev => {
+    state.empDetail = parseInt(ev.currentTarget.dataset.rhView);
+    state.empTab = 'info';
+    state.page = 'employees';
+    render();
+  }));
+}
+
+function rhEntries() {
+  // Entrées : salariés avec contratDebut dans les 90 derniers jours
+  const now = new Date();
+  const cutoff = addDays(now, -90);
+  const list = state.employees.map(normEmp).filter(n => {
+    if (!n.contratDebut) return false;
+    const d = new Date(n.contratDebut);
+    return d >= cutoff && d <= addDays(now, 30);
+  }).sort((a,b) => (b.contratDebut||'').localeCompare(a.contratDebut||''));
+  return rhTable(list, [
+    { label: 'Date d\'entrée', val: e => fmtDateShort(e.contratDebut) },
+    { label: 'Salarié', val: e => `${e.prenom} ${e.nom}` },
+    { label: 'Contrat', val: e => e.contrat||'—' },
+    { label: 'Poste', val: e => e.poste||'—' },
+    { label: 'Email', val: e => e.email||'—' },
+    { label: 'Tél.', val: e => e.telMobile||'—' },
+  ], 'Aucune entrée dans les 90 derniers jours');
+}
+
+function rhExits() {
+  const list = state.employees.map(normEmp).filter(n => n.dateSortie).sort((a,b) => (b.dateSortie||'').localeCompare(a.dateSortie||''));
+  return rhTable(list, [
+    { label: 'Date de sortie', val: e => fmtDateShort(e.dateSortie) },
+    { label: 'Salarié', val: e => `${e.prenom} ${e.nom}` },
+    { label: 'Motif', val: e => e.motifSortie||'—' },
+    { label: 'Contrat', val: e => e.contrat||'—' },
+    { label: 'Email', val: e => e.email||'—' },
+  ], 'Aucune sortie enregistrée');
+}
+
+function rhEssai() {
+  // Salariés en période d'essai : contratDebut + periodeEssaiJours > today
+  const now = new Date();
+  const cutoff = addDays(now, 60); // afficher ceux dont la fin d'essai arrive dans les 60 prochains jours
+  const list = state.employees.map(normEmp).filter(n => {
+    if (!n.contratDebut || !n.periodeEssaiJours) return false;
+    const finEssai = addDays(new Date(n.contratDebut), n.periodeEssaiJours);
+    return finEssai >= addDays(now, -7) && finEssai <= cutoff;
+  }).map(n => ({...n, finEssai: addDays(new Date(n.contratDebut), n.periodeEssaiJours)}))
+    .sort((a,b) => a.finEssai - b.finEssai);
+  return rhTable(list, [
+    { label: 'Fin période essai', val: e => fmtDateShort(dateISO(e.finEssai)) },
+    { label: 'Date d\'entrée', val: e => fmtDateShort(e.contratDebut) },
+    { label: 'Salarié', val: e => `${e.prenom} ${e.nom}` },
+    { label: 'Contrat', val: e => e.contrat||'—' },
+  ], 'Aucune fin de période d\'essai à venir');
+}
+
+function rhIncomplete() {
+  const list = state.employees.map(normEmp).filter(n => !isProfileComplete(n));
+  return rhTable(list, [
+    { label: 'Salarié', val: e => `${e.prenom} ${e.nom}` },
+    { label: 'Manque email', val: e => e.email?'✓':'<span style="color:var(--c-alert);">✗</span>' },
+    { label: 'Manque tél.', val: e => e.telMobile?'✓':'<span style="color:var(--c-alert);">✗</span>' },
+    { label: 'Manque date naiss.', val: e => e.dateNaissance?'✓':'<span style="color:var(--c-alert);">✗</span>' },
+    { label: 'Manque adresse', val: e => e.adresse?'✓':'<span style="color:var(--c-alert);">✗</span>' },
+    { label: 'Manque CP/ville', val: e => (e.codePostal && e.ville)?'✓':'<span style="color:var(--c-alert);">✗</span>' },
+    { label: 'Manque contrat', val: e => e.contratDebut?'✓':'<span style="color:var(--c-alert);">✗</span>' },
+  ], 'Tous les profils sont complets ✓');
+}
+
+function rhTable(list, cols, emptyMsg) {
+  return `
+    <div class="panel">
+      <div class="panel-body ${list.length?'nopad':''}" style="${list.length?'overflow-x:auto':''}">
+        ${list.length === 0 ? `<div class="text-mute" style="text-align:center;padding:32px 0;font-size:13px;">${esc(emptyMsg)}</div>` : `
+          <table class="tbl">
+            <thead><tr>${cols.map(c => `<th>${esc(c.label)}</th>`).join('')}<th></th></tr></thead>
+            <tbody>
+              ${list.map(e => `
+                <tr>
+                  ${cols.map(c => `<td>${c.val(e)}</td>`).join('')}
+                  <td><button class="btn-ghost" data-rh-view="${e.id}">Voir →</button></td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        `}
+      </div>
+    </div>
+  `;
+}
+
+// ── Small helper for key-value rows in the detail panels ──
+function kvRow(label, value) {
+  return `<div class="kv-row"><div class="kv-label">${esc(label)}</div><div class="kv-value">${typeof value === 'string' ? esc(value) : value}</div></div>`;
+}
 // ─────────── EMPLOYEE MOBILE SHELL ───────────
 function viewEmpShell() {
   return `
@@ -1742,9 +2857,13 @@ function viewEmpShell() {
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
           Planning
         </button>
+        <button class="emp-tab ${state.page==='myreqs'?'active':''}" data-page="myreqs">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 2a10 10 0 0 1 10 10c0 5-4 9-9 10l-1-4"/><circle cx="12" cy="12" r="3"/></svg>
+          Absences
+        </button>
         <button class="emp-tab ${state.page==='myhours'?'active':''}" data-page="myhours">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
-          Mes heures
+          Heures
         </button>
         <button class="emp-tab ${state.page==='profile'?'active':''}" data-page="profile">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="8" r="4"/><path d="M4 21v-1a7 7 0 0 1 7-7h2a7 7 0 0 1 7 7v1"/></svg>
@@ -1758,6 +2877,7 @@ function renderEmpPage() {
   switch (state.page) {
     case 'home': return empHome();
     case 'myweek': return empWeek();
+    case 'myreqs': return empMyRequests();
     case 'myhours': return empHours();
     case 'profile': return empProfile();
     default: return empHome();
@@ -1774,10 +2894,103 @@ function bindEmp() {
   switch (state.page) {
     case 'home': bindEmpHome(); break;
     case 'myweek': break;
+    case 'myreqs': bindEmpMyRequests(); break;
     case 'myhours': break;
     case 'profile': break;
   }
 }
+
+// ─────────── EMPLOYEE — MY REQUESTS ───────────
+function empMyRequests() {
+  const empId = state.user.empId;
+  const reqs = Object.entries(state.absenceRequests||{})
+    .map(([id,r]) => ({...r, id}))
+    .filter(r => r.empId === empId)
+    .sort((a,b) => (b.createdAt||'').localeCompare(a.createdAt||''));
+
+  return `
+    <div class="row" style="justify-content:space-between;margin-bottom:14px;">
+      <div>
+        <div class="uppercase-eyebrow">Mes absences</div>
+        <div class="serif" style="font-size:24px;letter-spacing:-0.02em;">Demandes</div>
+      </div>
+    </div>
+
+    <button class="punch-btn" id="newReq" style="margin-bottom:16px;">+ Nouvelle demande</button>
+
+    ${reqs.length === 0 ? `
+      <div class="panel" style="background:#fafafa;border-style:dashed;">
+        <div class="panel-body" style="text-align:center;padding:24px 18px;">
+          <div style="font-size:32px;margin-bottom:8px;">🌴</div>
+          <div class="text-mute" style="font-size:13px;">Aucune demande pour le moment</div>
+        </div>
+      </div>
+    ` : reqs.map(r => {
+      const lt = LEAVE_TYPES[r.type];
+      return `
+        <div class="panel" style="margin-bottom:10px;">
+          <div class="panel-body" style="padding:14px 16px;">
+            <div class="row" style="justify-content:space-between;margin-bottom:6px;">
+              <div style="font-weight:500;">${esc(lt?.label||r.type)}</div>
+              ${reqStatusChip(r.status)}
+            </div>
+            <div class="text-mute mono" style="font-size:12px;">
+              ${fmtDateShort(r.dateStart)} → ${fmtDateShort(r.dateEnd)} · ${r.nbJours||'?'} jour${r.nbJours>1?'s':''}
+            </div>
+            ${r.motif ? `<div style="margin-top:6px;font-size:12.5px;color:var(--c-ink-3);">"${esc(r.motif)}"</div>` : ''}
+            ${r.commentAdmin ? `<div style="margin-top:6px;font-size:12px;color:var(--c-alert);">Décision : ${esc(r.commentAdmin)}</div>` : ''}
+          </div>
+        </div>
+      `;
+    }).join('')}
+  `;
+}
+
+function bindEmpMyRequests() {
+  $('#newReq').addEventListener('click', () => openEmpAbsenceRequest());
+}
+
+function openEmpAbsenceRequest() {
+  const empId = state.user.empId;
+  const body = `
+    <div class="form-grid">
+      <div class="field full"><label class="field-label">Type d'absence</label>
+        <select class="input" id="erType">
+          ${Object.entries(LEAVE_TYPES).map(([k,v]) => `<option value="${k}">${esc(v.label)}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field"><label class="field-label">Du</label><input class="input" id="erStart" type="date" value="${dateISO(new Date())}"></div>
+      <div class="field"><label class="field-label">Au</label><input class="input" id="erEnd" type="date" value="${dateISO(new Date())}"></div>
+      <div class="field full"><label class="field-label">Motif (optionnel)</label><textarea class="input" id="erMotif" rows="3" placeholder="Pourquoi cette absence..."></textarea></div>
+      <div class="field full text-mute" style="font-size:11.5px;">Ta demande sera envoyée à la direction. Tu seras notifié dès qu'elle sera traitée.</div>
+    </div>
+  `;
+  const footer = `<div class="spacer"></div><button class="btn-sec" data-close>Annuler</button><button class="btn-pri" id="erSave" style="width:auto;padding:10px 18px;">Envoyer la demande</button>`;
+  const { close } = openModal({ title: 'Nouvelle demande d\'absence', body, footer });
+  $('#erSave').addEventListener('click', () => {
+    const start = $('#erStart').value;
+    const endVal = $('#erEnd').value;
+    if (!start || !endVal) { toast('Renseigne les dates', 'error'); return; }
+    if (endVal < start) { toast('Date de fin avant date de début', 'error'); return; }
+    const sD = new Date(start), eD = new Date(endVal);
+    const nbJours = Math.round((eD - sD)/86400000) + 1;
+    const id = 'r' + Date.now();
+    const r = {
+      empId, type: $('#erType').value,
+      dateStart: start, dateEnd: endVal,
+      motif: $('#erMotif').value.trim(),
+      nbJours,
+      status: 'pending', createdAt: new Date().toISOString(),
+    };
+    state.absenceRequests[id] = r;
+    fbSave(`absenceRequests/${id}`, r);
+    toast('Demande envoyée à la direction', 'good');
+    close();
+    render();
+  });
+}
+
+
 
 // ─────────── EMPLOYEE — HOME (PUNCH) ───────────
 function empHome() {
