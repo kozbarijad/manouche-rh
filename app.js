@@ -333,6 +333,14 @@ function normEmp(e) {
     certifHACCPDate: '',
     permisB: false, permisBFin: '',
     peutSeConnecter: true,
+    // NOUVEAU — Modalités de paie spécifiques
+    exclureCP: false,          // pas de gestion de congés payés (extra, etc.)
+    sansHeuresSupp: false,     // toutes les heures au taux normal
+    payeNet: false,            // le taux saisi est un net (pas un brut)
+    exclurePaie: false,        // exclu du récap paie (gérant non salarié, stagiaire...)
+    forfaitJours: false,       // forfait jours — pas de décompte horaire
+    sansAvantageRepas: false,  // pas d'avantage en nature repas
+    sansNavigo: false,         // pas de remboursement transport
     dispos: { 0: true, 1: true, 2: true, 3: true, 4: true, 5: true, 6: true },
     avenants: [], documents: [],
   };
@@ -2264,12 +2272,17 @@ function pageHours() {
       }
       // Compute heures sup for this week based on contract
       const contractH = n.heures || 35;
-      const wkNormal = Math.min(wkPlanned, contractH);
-      const wkSupp25 = Math.min(Math.max(wkPlanned - contractH, 0), 8);
-      const wkSupp50 = Math.max(wkPlanned - contractH - 8, 0);
-      normalH += wkNormal;
-      supplH25 += wkSupp25;
-      supplH50 += wkSupp50;
+      if (n.sansHeuresSupp) {
+        // Toutes les heures comptées comme normales (forfait, accord spécifique)
+        normalH += wkPlanned;
+      } else {
+        const wkNormal = Math.min(wkPlanned, contractH);
+        const wkSupp25 = Math.min(Math.max(wkPlanned - contractH, 0), 8);
+        const wkSupp50 = Math.max(wkPlanned - contractH - 8, 0);
+        normalH += wkNormal;
+        supplH25 += wkSupp25;
+        supplH50 += wkSupp50;
+      }
     }
 
     const taux = n.taux || 12;
@@ -2277,14 +2290,28 @@ function pageHours() {
     const salaireS25 = supplH25 * taux * 1.25;
     const salaireS50 = supplH50 * taux * 1.50;
     const totalBrutPlanifie = salaireNormal + salaireS25 + salaireS50;
-    const navigoMensuel = n.navigoMensuel || 0;
+    const navigoMensuel = n.sansNavigo ? 0 : (n.navigoMensuel || 0);
 
     // HCR — repas et coupures (calcul auto sur les shifts du mois)
-    const hcr = hcrMensuelEmp(emp.id, year, month);
+    const hcr = n.sansAvantageRepas
+      ? { repas: 0, valeurRepas: 0, coupures: hcrMensuelEmp(emp.id, year, month).coupures }
+      : hcrMensuelEmp(emp.id, year, month);
 
     // Pourboires manuels (stockés dans state.pourboires[`${empId}_${year}-${month+1}`])
     const moisKey = `${emp.id}_${year}-${pad(month+1)}`;
     const pourboires = (state.pourboires && state.pourboires[moisKey]) || 0;
+
+    // 8 dernières semaines (heures planifiées) pour mini-graphique
+    const sparkWeeks = [];
+    for (let i = 7; i >= 0; i--) {
+      const w = addDays(getMonday(new Date()), -7 * i);
+      const wk = weekKey(w);
+      let h = 0;
+      for (let d = 0; d < 7; d++) {
+        (state.shifts[`${emp.id}_${d}_${wk}`] || []).map(normShift).forEach(s => h += shiftHours(s));
+      }
+      sparkWeeks.push({ date: w, hours: h });
+    }
 
     return {
       emp, n,
@@ -2294,13 +2321,9 @@ function pageHours() {
       leaves, workedDays, ferieWorked,
       navigoMensuel,
       repas: hcr.repas, valeurRepas: hcr.valeurRepas, coupures: hcr.coupures,
-      pourboires,
+      pourboires, sparkWeeks,
     };
-  });
-
-  // 8 last weeks for synthesis
-  const weeks = [];
-  for (let i = 7; i >= 0; i--) weeks.push(addDays(state.weekStart, -7 * i));
+  }).filter(d => !d.n.exclurePaie);
 
   // Team-wide totals for KPI cards
   const teamTotalBrut = data.reduce((s,d) => s + d.totalBrutPlanifie, 0);
@@ -2364,6 +2387,17 @@ function pageHours() {
           const totalAbs = (d.leaves.absent_justifie||0) + (d.leaves.absent_injustifie||0);
           const totalH = d.normalH + d.supplH25 + d.supplH50;
           const totalBrut = d.totalBrutPlanifie + (d.pourboires||0) + d.valeurRepas + d.navigoMensuel;
+          // Modifier badges
+          const modifs = [];
+          if (d.n.sansHeuresSupp) modifs.push('Sans heures sup');
+          if (d.n.payeNet) modifs.push('Payé net');
+          if (d.n.exclureCP) modifs.push('Sans CP');
+          if (d.n.forfaitJours) modifs.push('Forfait jours');
+          if (d.n.sansAvantageRepas) modifs.push('Sans repas');
+          if (d.n.sansNavigo) modifs.push('Sans Navigo');
+          // Sparkline 8 semaines
+          const maxH = Math.max(...d.sparkWeeks.map(w => w.hours), d.n.heures || 35, 1);
+          const contractLine = ((d.n.heures||35) / maxH) * 100;
           return `
             <article class="paie-card">
               <header class="paie-card-head">
@@ -2371,11 +2405,13 @@ function pageHours() {
                   <div class="av-emp">${initials(d.emp)}</div>
                   <div class="stack">
                     <div class="paie-card-name">${esc(d.emp.prenom)} ${esc(d.emp.nom)}</div>
-                    <div class="paie-card-sub">${esc(d.emp.poste||'—')} · ${esc(d.emp.contrat||'—')} ${d.n.heures||0}h · ${d.n.taux ? d.n.taux.toFixed(2) : '—'} €/h</div>
+                    <div class="paie-card-sub">${esc(d.emp.poste||'—')} · ${esc(d.emp.contrat||'—')} ${d.n.heures||0}h · ${d.n.taux ? d.n.taux.toFixed(2) : '—'} €/h${d.n.payeNet ? ' net' : ''}</div>
                   </div>
                 </div>
                 <button class="btn-ghost" data-detail-emp="${d.emp.id}" title="Voir la fiche">Fiche →</button>
               </header>
+
+              ${modifs.length ? `<div class="paie-modifs">${modifs.map(m => `<span class="paie-modif-tag">${esc(m)}</span>`).join('')}</div>` : ''}
 
               <div class="paie-stats">
                 <div class="paie-stat">
@@ -2439,6 +2475,25 @@ function pageHours() {
                   <span class="paie-pill-label">Pourboires</span>
                   <input type="number" data-tip="${d.emp.id}" value="${d.pourboires||''}" placeholder="0.00" step="0.01">
                   <span class="paie-pill-unit">€</span>
+                </div>
+              </div>
+
+              <div class="paie-spark">
+                <div class="paie-spark-head">
+                  <span class="paie-spark-title">Heures planifiées · 8 dernières semaines</span>
+                  <span class="paie-spark-legend">— contrat ${d.n.heures||35}h</span>
+                </div>
+                <div class="paie-spark-bars">
+                  <div class="paie-spark-contract" style="bottom:${contractLine}%;"></div>
+                  ${d.sparkWeeks.map(w => {
+                    const hPct = (w.hours / maxH) * 100;
+                    const gap = w.hours - (d.n.heures||35);
+                    const barCls = w.hours === 0 ? 'empty' : Math.abs(gap) < 1 ? 'ok' : gap > 0 ? 'over' : 'under';
+                    return `<div class="paie-spark-col" title="Semaine du ${w.date.toLocaleDateString('fr-FR')} : ${w.hours.toFixed(1)}h">
+                      <div class="paie-spark-bar ${barCls}" style="height:${Math.max(hPct,2)}%;"></div>
+                      <div class="paie-spark-label">${pad(w.date.getDate())}/${pad(w.date.getMonth()+1)}</div>
+                    </div>`;
+                  }).join('')}
                 </div>
               </div>
             </article>
@@ -2569,52 +2624,9 @@ function pageHours() {
       </div>
     `}
 
-    <div class="panel" style="margin-top:14px;">
-      <div class="panel-head">
-        <h3>8 dernières semaines · heures planifiées</h3>
-      </div>
-      <div class="panel-body nopad" style="overflow-x:auto;">
-        <table class="tbl">
-          <thead>
-            <tr>
-              <th>Salarié</th>
-              <th>Contrat</th>
-              ${weeks.map(w => `<th class="mono">S.${pad(w.getDate())}/${pad(w.getMonth()+1)}</th>`).join('')}
-              <th>Moy./sem</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${actives.map(emp => {
-              const wkHours = weeks.map(w => {
-                const wk = weekKey(w);
-                let h = 0;
-                for (let d = 0; d < 7; d++) {
-                  (state.shifts[`${emp.id}_${d}_${wk}`] || []).map(normShift).forEach(s => h += shiftHours(s));
-                }
-                return h;
-              });
-              const avg = wkHours.reduce((a,b)=>a+b,0) / wkHours.length;
-              return `
-                <tr>
-                  <td><div class="emp-cell"><div class="av-emp sm">${initials(emp)}</div><span class="emp-cell-name">${esc(emp.prenom)}</span></div></td>
-                  <td class="mono">${emp.heures}h</td>
-                  ${wkHours.map(h => {
-                    const gap = h - emp.heures;
-                    const cls = h === 0 ? 'text-dim' : Math.abs(gap) < 1 ? '' : gap > 0 ? 'over' : 'under';
-                    return `<td class="mono tabular ${cls}">${h > 0 ? h.toFixed(1) : '—'}</td>`;
-                  }).join('')}
-                  <td class="mono tabular"><strong>${avg.toFixed(1)}</strong></td>
-                </tr>
-              `;
-            }).join('')}
-          </tbody>
-        </table>
-      </div>
-    </div>
-
-    <div class="row text-mute" style="margin-top:12px;font-size:11.5px;gap:14px;flex-wrap:wrap;">
+    <div class="row text-mute" style="margin-top:16px;font-size:11.5px;gap:14px;flex-wrap:wrap;">
       <span><strong>Brut estimé</strong> = (H. normales × taux) + (H. sup 25% × taux × 1,25) + (H. sup 50% × taux × 1,50)</span>
-      <span><strong>Hors</strong> : primes, ancienneté, panier-repas, mutuelle, charges</span>
+      <span><strong>Hors</strong> : primes, ancienneté, mutuelle, charges patronales</span>
     </div>
   `;
 }
@@ -3246,6 +3258,7 @@ function empTabContrats(n) {
     <div class="row" style="justify-content:center;gap:8px;margin-top:18px;flex-wrap:wrap;">
       <button class="btn-pri" id="editContrat" style="width:auto;">✎ Modifier le contrat</button>
       <button class="btn-sec" id="editConformite" style="width:auto;">⚖️ Conformité</button>
+      <button class="btn-sec" id="editModalites" style="width:auto;">💶 Modalités de paie</button>
       ${!n.dateSortie ? `<button class="btn-sec" id="openPackSortie" style="width:auto;">📋 Pack sortie</button>` : `<span class="chip alert">Sortie le ${fmtDateShort(n.dateSortie)} · ${esc(n.motifSortie||'—')}</span>`}
     </div>
   `;
@@ -3257,6 +3270,8 @@ function bindEmpTabContrats() {
   if (addBtn) addBtn.addEventListener('click', () => openAvenantEditor());
   const confBtn = $('#editConformite');
   if (confBtn) confBtn.addEventListener('click', () => openConformiteEditor());
+  const modBtn = $('#editModalites');
+  if (modBtn) modBtn.addEventListener('click', () => openModalitesPaie());
   const psBtn = $('#openPackSortie');
   if (psBtn) psBtn.addEventListener('click', () => openPackSortie(state.empDetail));
   $$('[data-del-avenant]').forEach(b => b.addEventListener('click', ev => {
@@ -3483,6 +3498,56 @@ function openConformiteEditor() {
     state.employees = state.employees.map(x => x.id === e.id ? updated : x);
     fbSave('employees', state.employees);
     toast('Conformité mise à jour', 'good');
+    close();
+    render();
+  });
+}
+
+// ── Modalités de paie spécifiques ──
+function openModalitesPaie() {
+  const e = state.employees.find(x => x.id === state.empDetail);
+  const n = normEmp(e);
+  const flag = (id, checked, label, detail) => `
+    <label class="modalite-row">
+      <input type="checkbox" id="${id}" ${checked?'checked':''}>
+      <div>
+        <div class="modalite-label">${label}</div>
+        <div class="modalite-detail">${detail}</div>
+      </div>
+    </label>
+  `;
+  const body = `
+    <div class="text-mute" style="font-size:12.5px;line-height:1.5;margin-bottom:18px;">
+      Ces réglages adaptent le calcul de la paie pour ce salarié. Ils s'appliquent automatiquement dans l'onglet Heures et les compteurs.
+    </div>
+    ${flag('mpSansHS', n.sansHeuresSupp, 'Sans heures supplémentaires', 'Toutes les heures comptées au taux normal — pas de majoration +25% / +50%. Utile pour un forfait ou un accord spécifique.')}
+    ${flag('mpForfait', n.forfaitJours, 'Forfait jours', 'Cadre au forfait — pas de décompte horaire détaillé, rémunération forfaitaire.')}
+    ${flag('mpExclureCP', n.exclureCP, 'Sans gestion de congés payés', 'Ce salarié n\'apparaît pas dans les compteurs CP. Pour les extras payés à la mission ou statuts particuliers.')}
+    ${flag('mpPayeNet', n.payeNet, 'Rémunération exprimée en net', 'Le taux horaire saisi est un montant net (et non brut). Affiché avec la mention "net".')}
+    ${flag('mpSansRepas', n.sansAvantageRepas, 'Sans avantage en nature repas', 'Ne pas calculer l\'avantage repas HCR (4,15€/repas) pour ce salarié.')}
+    ${flag('mpSansNavigo', n.sansNavigo, 'Sans remboursement transport', 'Pas de prise en charge Navigo, même si un montant est renseigné dans le contrat.')}
+    ${flag('mpExclurePaie', n.exclurePaie, 'Exclure du récap paie', 'Ce salarié n\'apparaît pas du tout dans l\'onglet Heures. Pour un gérant non salarié, un stagiaire non rémunéré, etc.')}
+  `;
+  const footer = `
+    <button class="btn-sec" data-close>Annuler</button>
+    <button class="btn-pri" id="mpSave" style="width:auto;">Enregistrer</button>
+  `;
+  const { close } = openModal({ title: 'Modalités de paie', body, footer });
+
+  $('#mpSave').addEventListener('click', () => {
+    const updated = {
+      ...e,
+      sansHeuresSupp: $('#mpSansHS').checked,
+      forfaitJours: $('#mpForfait').checked,
+      exclureCP: $('#mpExclureCP').checked,
+      payeNet: $('#mpPayeNet').checked,
+      sansAvantageRepas: $('#mpSansRepas').checked,
+      sansNavigo: $('#mpSansNavigo').checked,
+      exclurePaie: $('#mpExclurePaie').checked,
+    };
+    state.employees = state.employees.map(x => x.id === e.id ? updated : x);
+    fbSave('employees', state.employees);
+    toast('Modalités de paie mises à jour', 'good');
     close();
     render();
   });
@@ -4332,7 +4397,7 @@ function openAbsenceCreator(empId) {
 
 // ─────────── COMPTEURS CP ───────────
 function pageCpCompteurs() {
-  const actives = state.employees.filter(e => e.statut === 'Actif');
+  const actives = state.employees.filter(e => e.statut === 'Actif' && !normEmp(e).exclureCP);
   return `
     <div class="page-head">
       <div>
