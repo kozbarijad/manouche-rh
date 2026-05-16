@@ -2398,58 +2398,57 @@ function pageHours() {
                 <div class="pcard-id">
                   <div class="av-emp sm">${initials(d.emp)}</div>
                   <div>
-                    <div class="pcard-name">${esc(d.emp.prenom)} ${esc(d.emp.nom)}${modifs.length ? modifs.map(m => `<span class="pcard-modif">${esc(m)}</span>`).join('') : ''}</div>
-                    <div class="pcard-meta">${esc(d.emp.poste||'—')} · ${esc(d.emp.contrat||'—')} ${d.n.heures||0}h · ${d.n.taux ? d.n.taux.toFixed(2) : '—'}€/h${d.n.payeNet ? ' net' : ''}</div>
+                    <div class="pcard-name">${esc(d.emp.prenom)} ${esc(d.emp.nom)}</div>
+                    <div class="pcard-meta">${esc(d.emp.poste||'—')} · ${esc(d.emp.contrat||'—')} ${d.n.heures||0}h · ${d.n.taux ? d.n.taux.toFixed(2) : '—'}€/h${d.n.payeNet ? ' net' : ''}${modifs.length ? ' · ' + modifs.join(' · ') : ''}</div>
                   </div>
                 </div>
                 <button class="btn-ghost" data-detail-emp="${d.emp.id}" title="Voir la fiche">Fiche →</button>
               </header>
 
-              <div class="pcard-stats">
-                <div class="pstat">
-                  <span class="pstat-k">Normales</span>
-                  <span class="pstat-v">${d.normalH.toFixed(1)}<i>h</i></span>
+              <div class="ptiles">
+                <div class="ptile blue">
+                  <div class="ptile-num">${d.normalH.toFixed(1)}<small>h</small></div>
+                  <div class="ptile-lbl">Heures normales</div>
                 </div>
-                <div class="pstat">
-                  <span class="pstat-k">Sup +25%</span>
-                  <span class="pstat-v ${d.supplH25>0?'c-warn':''}">${d.supplH25.toFixed(1)}<i>h</i></span>
+                <div class="ptile ${d.supplH25>0?'amber':'mute'}">
+                  <div class="ptile-num">${d.supplH25.toFixed(1)}<small>h</small></div>
+                  <div class="ptile-lbl">Sup. +25%</div>
                 </div>
-                <div class="pstat">
-                  <span class="pstat-k">Sup +50%</span>
-                  <span class="pstat-v ${d.supplH50>0?'c-alert':''}">${d.supplH50.toFixed(1)}<i>h</i></span>
+                <div class="ptile ${d.supplH50>0?'orange':'mute'}">
+                  <div class="ptile-num">${d.supplH50.toFixed(1)}<small>h</small></div>
+                  <div class="ptile-lbl">Sup. +50%</div>
                 </div>
-                <div class="pstat-div"></div>
-                <div class="pstat pstat-hl">
-                  <span class="pstat-k">Total</span>
-                  <span class="pstat-v">${totalH.toFixed(1)}<i>h</i></span>
+                <div class="ptile green">
+                  <div class="ptile-num">${totalH.toFixed(1)}<small>h</small></div>
+                  <div class="ptile-lbl">Total heures</div>
                 </div>
-                <div class="pstat pstat-money">
-                  <span class="pstat-k">Brut estimé</span>
-                  <span class="pstat-v">${Math.round(d.totalBrutPlanifie).toLocaleString('fr-FR')}<i>€</i></span>
+                <div class="ptile solid">
+                  <div class="ptile-num">${Math.round(d.totalBrutPlanifie).toLocaleString('fr-FR')}<small>€</small></div>
+                  <div class="ptile-lbl">Brut estimé</div>
                 </div>
-                <div class="pstat">
-                  <span class="pstat-k">Repas</span>
-                  <span class="pstat-v">${d.repas}<i>· ${d.valeurRepas.toFixed(0)}€</i></span>
+                <div class="ptile violet">
+                  <div class="ptile-num">${d.repas}<small>repas · ${d.valeurRepas.toFixed(0)}€</small></div>
+                  <div class="ptile-lbl">Avantage repas</div>
                 </div>
               </div>
 
-              <div class="pcard-pills">
-                <span class="ppill ${d.coupures>0?'warn':''}">Coupures <b>${d.coupures>0?d.coupures.toFixed(1)+'h':'0h'}</b></span>
-                <span class="ppill">Navigo <b>${d.navigoMensuel?d.navigoMensuel.toFixed(0)+'€':'—'}</b></span>
-                <span class="ppill">CP <b>${d.leaves.cp||'0'}j</b></span>
-                <span class="ppill ${d.leaves.arret_maladie>0?'warn':''}">Arrêt mal. <b>${d.leaves.arret_maladie||'0'}j</b></span>
-                <span class="ppill ${totalAbs>0?'alert':''}">Absences <b>${totalAbs||'0'}j</b></span>
-                <span class="ppill ${d.ferieWorked>0?'accent':''}">Fériés <b>${d.ferieWorked||'0'}j</b></span>
-                <span class="ppill ppill-in">Pourboires <input type="number" data-tip="${d.emp.id}" value="${d.pourboires||''}" placeholder="0" step="0.01"><i>€</i></span>
+              <div class="pcard-info">
+                <span class="pinfo">Coupures<b>${d.coupures>0?d.coupures.toFixed(1)+'h':'0h'}</b></span>
+                <span class="pinfo">Navigo<b>${d.navigoMensuel?d.navigoMensuel.toFixed(0)+'€':'—'}</b></span>
+                <span class="pinfo">CP<b>${d.leaves.cp||'0'}j</b></span>
+                <span class="pinfo ${d.leaves.arret_maladie>0?'hot':''}">Arrêt maladie<b>${d.leaves.arret_maladie||'0'}j</b></span>
+                <span class="pinfo ${totalAbs>0?'hot':''}">Absences<b>${totalAbs||'0'}j</b></span>
+                <span class="pinfo ${d.ferieWorked>0?'good':''}">Fériés trav.<b>${d.ferieWorked||'0'}j</b></span>
+                <span class="pinfo pinfo-in">Pourboires<input type="number" data-tip="${d.emp.id}" value="${d.pourboires||''}" placeholder="0"><i>€</i></span>
               </div>
 
               <div class="pcard-weeks">
-                <span class="pcard-weeks-lbl">8 dern. semaines · contrat ${d.n.heures||35}h</span>
+                <span class="pweeks-lbl">8 dernières semaines · contrat ${d.n.heures||35}h</span>
                 <div class="pweeks-row">
                   ${d.sparkWeeks.map(w => {
                     const gap = w.hours - (d.n.heures||35);
                     const cls = w.hours === 0 ? 'empty' : Math.abs(gap) < 1 ? 'ok' : gap > 0 ? 'over' : 'under';
-                    return `<span class="pweek ${cls}" title="Semaine du ${w.date.toLocaleDateString('fr-FR')}">${w.hours>0?w.hours.toFixed(1):'0'}<em>${pad(w.date.getDate())}/${pad(w.date.getMonth()+1)}</em></span>`;
+                    return `<span class="pweek ${cls}" title="Semaine du ${w.date.toLocaleDateString('fr-FR')}"><b>${w.hours>0?w.hours.toFixed(1):'0'}</b><em>${pad(w.date.getDate())}/${pad(w.date.getMonth()+1)}</em></span>`;
                   }).join('')}
                 </div>
               </div>
@@ -2467,14 +2466,31 @@ function pageHours() {
                 </div>
               </div>
             </header>
-            <div class="pcard-stats">
-              <div class="pstat"><span class="pstat-k">Heures totales</span><span class="pstat-v">${teamTotalH.toFixed(0)}<i>h</i></span></div>
-              <div class="pstat"><span class="pstat-k">Heures sup.</span><span class="pstat-v ${teamSuppH>0?'c-warn':''}">${teamSuppH.toFixed(1)}<i>h</i></span></div>
-              <div class="pstat-div"></div>
-              <div class="pstat pstat-money"><span class="pstat-k">Masse brute</span><span class="pstat-v">${Math.round(teamTotalBrut).toLocaleString('fr-FR')}<i>€</i></span></div>
-              <div class="pstat"><span class="pstat-k">Repas</span><span class="pstat-v">${data.reduce((s,d)=>s+d.valeurRepas,0).toFixed(0)}<i>€</i></span></div>
-              <div class="pstat"><span class="pstat-k">Pourboires</span><span class="pstat-v">${data.reduce((s,d)=>s+(d.pourboires||0),0).toFixed(0)}<i>€</i></span></div>
-              <div class="pstat"><span class="pstat-k">Navigo</span><span class="pstat-v">${data.reduce((s,d)=>s+(d.navigoMensuel||0),0).toFixed(0)}<i>€</i></span></div>
+            <div class="ptiles">
+              <div class="ptile blue">
+                <div class="ptile-num">${teamTotalH.toFixed(0)}<small>h</small></div>
+                <div class="ptile-lbl">Heures totales</div>
+              </div>
+              <div class="ptile ${teamSuppH>0?'amber':'mute'}">
+                <div class="ptile-num">${teamSuppH.toFixed(1)}<small>h</small></div>
+                <div class="ptile-lbl">Heures sup.</div>
+              </div>
+              <div class="ptile solid">
+                <div class="ptile-num">${Math.round(teamTotalBrut).toLocaleString('fr-FR')}<small>€</small></div>
+                <div class="ptile-lbl">Masse brute</div>
+              </div>
+              <div class="ptile violet">
+                <div class="ptile-num">${data.reduce((s,d)=>s+d.valeurRepas,0).toFixed(0)}<small>€</small></div>
+                <div class="ptile-lbl">Repas</div>
+              </div>
+              <div class="ptile green">
+                <div class="ptile-num">${data.reduce((s,d)=>s+(d.pourboires||0),0).toFixed(0)}<small>€</small></div>
+                <div class="ptile-lbl">Pourboires</div>
+              </div>
+              <div class="ptile mute">
+                <div class="ptile-num">${data.reduce((s,d)=>s+(d.navigoMensuel||0),0).toFixed(0)}<small>€</small></div>
+                <div class="ptile-lbl">Navigo</div>
+              </div>
             </div>
           </article>
         ` : ''}
