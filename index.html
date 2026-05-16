@@ -888,74 +888,70 @@ a { color: inherit; text-decoration: none; }
   letter-spacing: 0.01em;
 }
 
-/* Sparkline 8 semaines */
-.paie-spark {
+/* Heures 8 semaines — affichage texte coloré */
+.paie-weeks {
   margin-top: 16px;
   padding-top: 16px;
   border-top: 1px dashed var(--c-line);
 }
-.paie-spark-head {
+.paie-weeks-head {
   display: flex;
   justify-content: space-between;
   align-items: baseline;
-  margin-bottom: 12px;
+  margin-bottom: 10px;
 }
-.paie-spark-title {
+.paie-weeks-title {
   font-size: 11px;
   font-weight: 500;
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--c-ink-4);
 }
-.paie-spark-legend {
+.paie-weeks-legend {
   font-size: 10.5px;
   color: var(--c-ink-5);
   font-family: var(--f-mono);
 }
-.paie-spark-bars {
+.paie-weeks-grid {
   display: grid;
   grid-template-columns: repeat(8, 1fr);
-  gap: 8px;
-  height: 78px;
-  position: relative;
-  align-items: end;
+  gap: 6px;
 }
-.paie-spark-contract {
-  position: absolute;
-  left: 0; right: 0;
-  height: 0;
-  border-top: 1.5px dashed var(--c-ink-5);
-  z-index: 2;
-  pointer-events: none;
+@media (max-width: 700px) { .paie-weeks-grid { grid-template-columns: repeat(4, 1fr); } }
+.paie-week-cell {
+  text-align: center;
+  padding: 8px 4px;
+  border-radius: 9px;
+  background: var(--c-paper);
 }
-.paie-spark-col {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: flex-end;
-  height: 100%;
-  cursor: default;
+.paie-week-hours {
+  font-family: var(--f-display);
+  font-size: 19px;
+  font-weight: 400;
+  letter-spacing: -0.02em;
+  line-height: 1;
+  color: var(--c-ink-3);
 }
-.paie-spark-bar {
-  width: 100%;
-  max-width: 32px;
-  border-radius: 5px 5px 0 0;
-  background: var(--c-ink-5);
-  transition: height .3s cubic-bezier(.2,.7,.2,1), filter .15s;
-  min-height: 2px;
+.paie-week-hours span {
+  font-family: var(--f-body);
+  font-size: 10px;
+  font-weight: 500;
+  opacity: 0.6;
+  margin-left: 1px;
 }
-.paie-spark-col:hover .paie-spark-bar { filter: brightness(0.88); }
-.paie-spark-bar.ok    { background: #93b89a; }
-.paie-spark-bar.over  { background: #e0a86c; }
-.paie-spark-bar.under { background: #cf8d7a; }
-.paie-spark-bar.empty { background: var(--c-line); }
-.paie-spark-label {
-  font-size: 8.5px;
-  color: var(--c-ink-5);
-  margin-top: 5px;
+.paie-week-date {
+  font-size: 9px;
   font-family: var(--f-mono);
-  white-space: nowrap;
+  color: var(--c-ink-5);
+  margin-top: 4px;
 }
+.paie-week-cell.ok    { background: var(--c-good); }
+.paie-week-cell.ok    .paie-week-hours { color: var(--c-good-dark); }
+.paie-week-cell.over  { background: var(--c-warn); }
+.paie-week-cell.over  .paie-week-hours { color: var(--c-warn-dark); }
+.paie-week-cell.under { background: var(--c-alert); }
+.paie-week-cell.under .paie-week-hours { color: var(--c-alert-dark); }
+.paie-week-cell.empty .paie-week-hours { color: var(--c-ink-5); }
 
 /* Modalités de paie editor */
 .modalite-row {

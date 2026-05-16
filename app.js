@@ -2395,9 +2395,6 @@ function pageHours() {
           if (d.n.forfaitJours) modifs.push('Forfait jours');
           if (d.n.sansAvantageRepas) modifs.push('Sans repas');
           if (d.n.sansNavigo) modifs.push('Sans Navigo');
-          // Sparkline 8 semaines
-          const maxH = Math.max(...d.sparkWeeks.map(w => w.hours), d.n.heures || 35, 1);
-          const contractLine = ((d.n.heures||35) / maxH) * 100;
           return `
             <article class="paie-card">
               <header class="paie-card-head">
@@ -2478,20 +2475,18 @@ function pageHours() {
                 </div>
               </div>
 
-              <div class="paie-spark">
-                <div class="paie-spark-head">
-                  <span class="paie-spark-title">Heures planifiées · 8 dernières semaines</span>
-                  <span class="paie-spark-legend">— contrat ${d.n.heures||35}h</span>
+              <div class="paie-weeks">
+                <div class="paie-weeks-head">
+                  <span class="paie-weeks-title">Heures planifiées · 8 dernières semaines</span>
+                  <span class="paie-weeks-legend">contrat ${d.n.heures||35}h/sem</span>
                 </div>
-                <div class="paie-spark-bars">
-                  <div class="paie-spark-contract" style="bottom:${contractLine}%;"></div>
+                <div class="paie-weeks-grid">
                   ${d.sparkWeeks.map(w => {
-                    const hPct = (w.hours / maxH) * 100;
                     const gap = w.hours - (d.n.heures||35);
-                    const barCls = w.hours === 0 ? 'empty' : Math.abs(gap) < 1 ? 'ok' : gap > 0 ? 'over' : 'under';
-                    return `<div class="paie-spark-col" title="Semaine du ${w.date.toLocaleDateString('fr-FR')} : ${w.hours.toFixed(1)}h">
-                      <div class="paie-spark-bar ${barCls}" style="height:${Math.max(hPct,2)}%;"></div>
-                      <div class="paie-spark-label">${pad(w.date.getDate())}/${pad(w.date.getMonth()+1)}</div>
+                    const cls = w.hours === 0 ? 'empty' : Math.abs(gap) < 1 ? 'ok' : gap > 0 ? 'over' : 'under';
+                    return `<div class="paie-week-cell ${cls}">
+                      <div class="paie-week-hours">${w.hours > 0 ? w.hours.toFixed(1) : '0'}<span>h</span></div>
+                      <div class="paie-week-date">${pad(w.date.getDate())}/${pad(w.date.getMonth()+1)}</div>
                     </div>`;
                   }).join('')}
                 </div>
@@ -3018,7 +3013,10 @@ function pageEmployeeDetail() {
           <div class="emp-header-name">${esc(e.prenom)} ${esc(e.nom)}</div>
           <div class="emp-header-sub">${esc(e.poste||'Non renseigné')} · ${esc(e.contrat||'—')} · ${e.heures||0}h / sem</div>
         </div>
-        <span class="chip ${e.statut==='Actif'?'good':''}">${esc(e.statut||'—')}</span>
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px;">
+          <span class="chip ${e.statut==='Actif'?'good':'alert'}">${esc(e.statut||'—')}</span>
+          ${e.statut !== 'Actif' ? `<button class="btn-sec" id="reactivateEmp" style="padding:5px 12px;font-size:12px;">↺ Réactiver</button>` : ''}
+        </div>
       </div>
       <div class="emp-header-grid">
         <div><div class="ehg-label">Début contrat</div><div class="ehg-value">${n.contratDebut ? fmtDateShort(n.contratDebut) : '—'}</div></div>
@@ -3058,6 +3056,17 @@ function bindEmployeeDetail() {
     state.empTab = ev.currentTarget.dataset.empTab;
     render();
   }));
+  const reactBtn = $('#reactivateEmp');
+  if (reactBtn) reactBtn.addEventListener('click', () => {
+    const e = state.employees.find(x => x.id === state.empDetail);
+    if (!e) return;
+    if (!confirm(`Réactiver ${e.prenom} ${e.nom} ?\n\nLe salarié redevient actif et réapparaît dans le planning, les heures et les compteurs.`)) return;
+    const updated = { ...e, statut: 'Actif', dateSortie: '', motifSortie: '' };
+    state.employees = state.employees.map(x => x.id === e.id ? updated : x);
+    fbSave('employees', state.employees);
+    toast(`${e.prenom} réactivé(e)`, 'good');
+    render();
+  });
   // Tab-specific bindings
   const tab = state.empTab || 'info';
   if (tab === 'info') bindEmpTabInfo();
@@ -3259,8 +3268,15 @@ function empTabContrats(n) {
       <button class="btn-pri" id="editContrat" style="width:auto;">✎ Modifier le contrat</button>
       <button class="btn-sec" id="editConformite" style="width:auto;">⚖️ Conformité</button>
       <button class="btn-sec" id="editModalites" style="width:auto;">💶 Modalités de paie</button>
-      ${!n.dateSortie ? `<button class="btn-sec" id="openPackSortie" style="width:auto;">📋 Pack sortie</button>` : `<span class="chip alert">Sortie le ${fmtDateShort(n.dateSortie)} · ${esc(n.motifSortie||'—')}</span>`}
+      ${!n.dateSortie
+        ? `<button class="btn-sec" id="openPackSortie" style="width:auto;">📋 Pack sortie</button>`
+        : `<button class="btn-sec" id="cancelSortie" style="width:auto;">↺ Annuler la sortie & réactiver</button>`}
     </div>
+    ${n.dateSortie ? `
+      <div style="text-align:center;margin-top:12px;">
+        <span class="chip alert">Sortie enregistrée le ${fmtDateShort(n.dateSortie)} · ${esc(n.motifSortie||'—')}</span>
+      </div>
+    ` : ''}
   `;
 }
 
@@ -3274,6 +3290,17 @@ function bindEmpTabContrats() {
   if (modBtn) modBtn.addEventListener('click', () => openModalitesPaie());
   const psBtn = $('#openPackSortie');
   if (psBtn) psBtn.addEventListener('click', () => openPackSortie(state.empDetail));
+  const cancelBtn = $('#cancelSortie');
+  if (cancelBtn) cancelBtn.addEventListener('click', () => {
+    const e = state.employees.find(x => x.id === state.empDetail);
+    if (!e) return;
+    if (!confirm(`Annuler la sortie de ${e.prenom} ${e.nom} et le réactiver ?\n\nLe salarié redevient actif et réapparaît dans le planning, les heures et les compteurs.`)) return;
+    const updated = { ...e, statut: 'Actif', dateSortie: '', motifSortie: '' };
+    state.employees = state.employees.map(x => x.id === e.id ? updated : x);
+    fbSave('employees', state.employees);
+    toast(`${e.prenom} réactivé(e)`, 'good');
+    render();
+  });
   $$('[data-del-avenant]').forEach(b => b.addEventListener('click', ev => {
     const i = parseInt(ev.currentTarget.dataset.delAvenant);
     if (!confirm('Supprimer cet avenant ?')) return;
@@ -5423,7 +5450,8 @@ function rhTable(list, cols, emptyMsg) {
 
 // ── Small helper for key-value rows in the detail panels ──
 function kvRow(label, value) {
-  return `<div class="kv-row"><div class="kv-label">${esc(label)}</div><div class="kv-value">${typeof value === 'string' ? esc(value) : value}</div></div>`;
+  // value peut contenir du HTML volontaire (chips) — les appelants échappent leur texte utilisateur
+  return `<div class="kv-row"><div class="kv-label">${esc(label)}</div><div class="kv-value">${value == null ? '—' : value}</div></div>`;
 }
 // ─────────── EMPLOYEE MOBILE SHELL ───────────
 function viewEmpShell() {
