@@ -2406,39 +2406,39 @@ function pageHours() {
               </header>
 
               <div class="ptiles">
-                <div class="ptile blue">
+                <div class="ptile">
                   <div class="ptile-num">${d.normalH.toFixed(1)}<small>h</small></div>
                   <div class="ptile-lbl">Heures normales</div>
                 </div>
-                <div class="ptile ${d.supplH25>0?'amber':'mute'}">
-                  <div class="ptile-num">${d.supplH25.toFixed(1)}<small>h</small></div>
+                <div class="ptile">
+                  <div class="ptile-num ${d.supplH25>0?'c-amber':'c-mute'}">${d.supplH25.toFixed(1)}<small>h</small></div>
                   <div class="ptile-lbl">Sup. +25%</div>
                 </div>
-                <div class="ptile ${d.supplH50>0?'orange':'mute'}">
-                  <div class="ptile-num">${d.supplH50.toFixed(1)}<small>h</small></div>
+                <div class="ptile">
+                  <div class="ptile-num ${d.supplH50>0?'c-red':'c-mute'}">${d.supplH50.toFixed(1)}<small>h</small></div>
                   <div class="ptile-lbl">Sup. +50%</div>
                 </div>
-                <div class="ptile green">
+                <div class="ptile">
                   <div class="ptile-num">${totalH.toFixed(1)}<small>h</small></div>
                   <div class="ptile-lbl">Total heures</div>
                 </div>
-                <div class="ptile solid">
-                  <div class="ptile-num">${Math.round(d.totalBrutPlanifie).toLocaleString('fr-FR')}<small>€</small></div>
+                <div class="ptile ptile-key">
+                  <div class="ptile-num c-green">${Math.round(d.totalBrutPlanifie).toLocaleString('fr-FR')}<small>€</small></div>
                   <div class="ptile-lbl">Brut estimé</div>
                 </div>
-                <div class="ptile violet">
+                <div class="ptile">
                   <div class="ptile-num">${d.repas}<small>repas · ${d.valeurRepas.toFixed(0)}€</small></div>
                   <div class="ptile-lbl">Avantage repas</div>
                 </div>
               </div>
 
               <div class="pcard-info">
-                <span class="pinfo">Coupures<b>${d.coupures>0?d.coupures.toFixed(1)+'h':'0h'}</b></span>
+                <span class="pinfo">Coupures<b class="${d.coupures>0?'c-amber':''}">${d.coupures>0?d.coupures.toFixed(1)+'h':'0h'}</b></span>
                 <span class="pinfo">Navigo<b>${d.navigoMensuel?d.navigoMensuel.toFixed(0)+'€':'—'}</b></span>
                 <span class="pinfo">CP<b>${d.leaves.cp||'0'}j</b></span>
-                <span class="pinfo ${d.leaves.arret_maladie>0?'hot':''}">Arrêt maladie<b>${d.leaves.arret_maladie||'0'}j</b></span>
-                <span class="pinfo ${totalAbs>0?'hot':''}">Absences<b>${totalAbs||'0'}j</b></span>
-                <span class="pinfo ${d.ferieWorked>0?'good':''}">Fériés trav.<b>${d.ferieWorked||'0'}j</b></span>
+                <span class="pinfo">Arrêt maladie<b class="${d.leaves.arret_maladie>0?'c-red':''}">${d.leaves.arret_maladie||'0'}j</b></span>
+                <span class="pinfo">Absences<b class="${totalAbs>0?'c-red':''}">${totalAbs||'0'}j</b></span>
+                <span class="pinfo">Fériés trav.<b class="${d.ferieWorked>0?'c-green':''}">${d.ferieWorked||'0'}j</b></span>
                 <span class="pinfo pinfo-in">Pourboires<input type="number" data-tip="${d.emp.id}" value="${d.pourboires||''}" placeholder="0"><i>€</i></span>
               </div>
 
@@ -2448,7 +2448,7 @@ function pageHours() {
                   ${d.sparkWeeks.map(w => {
                     const gap = w.hours - (d.n.heures||35);
                     const cls = w.hours === 0 ? 'empty' : Math.abs(gap) < 1 ? 'ok' : gap > 0 ? 'over' : 'under';
-                    return `<span class="pweek ${cls}" title="Semaine du ${w.date.toLocaleDateString('fr-FR')}"><b>${w.hours>0?w.hours.toFixed(1):'0'}</b><em>${pad(w.date.getDate())}/${pad(w.date.getMonth()+1)}</em></span>`;
+                    return `<span class="pweek" title="Semaine du ${w.date.toLocaleDateString('fr-FR')}"><b class="${cls}">${w.hours>0?w.hours.toFixed(1):'0'}</b><em>${pad(w.date.getDate())}/${pad(w.date.getMonth()+1)}</em></span>`;
                   }).join('')}
                 </div>
               </div>
@@ -2467,27 +2467,27 @@ function pageHours() {
               </div>
             </header>
             <div class="ptiles">
-              <div class="ptile blue">
+              <div class="ptile">
                 <div class="ptile-num">${teamTotalH.toFixed(0)}<small>h</small></div>
                 <div class="ptile-lbl">Heures totales</div>
               </div>
-              <div class="ptile ${teamSuppH>0?'amber':'mute'}">
-                <div class="ptile-num">${teamSuppH.toFixed(1)}<small>h</small></div>
+              <div class="ptile">
+                <div class="ptile-num ${teamSuppH>0?'c-amber':'c-mute'}">${teamSuppH.toFixed(1)}<small>h</small></div>
                 <div class="ptile-lbl">Heures sup.</div>
               </div>
-              <div class="ptile solid">
-                <div class="ptile-num">${Math.round(teamTotalBrut).toLocaleString('fr-FR')}<small>€</small></div>
+              <div class="ptile ptile-key">
+                <div class="ptile-num c-green">${Math.round(teamTotalBrut).toLocaleString('fr-FR')}<small>€</small></div>
                 <div class="ptile-lbl">Masse brute</div>
               </div>
-              <div class="ptile violet">
+              <div class="ptile">
                 <div class="ptile-num">${data.reduce((s,d)=>s+d.valeurRepas,0).toFixed(0)}<small>€</small></div>
                 <div class="ptile-lbl">Repas</div>
               </div>
-              <div class="ptile green">
+              <div class="ptile">
                 <div class="ptile-num">${data.reduce((s,d)=>s+(d.pourboires||0),0).toFixed(0)}<small>€</small></div>
                 <div class="ptile-lbl">Pourboires</div>
               </div>
-              <div class="ptile mute">
+              <div class="ptile">
                 <div class="ptile-num">${data.reduce((s,d)=>s+(d.navigoMensuel||0),0).toFixed(0)}<small>€</small></div>
                 <div class="ptile-lbl">Navigo</div>
               </div>

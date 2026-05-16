@@ -686,26 +686,26 @@ a { color: inherit; text-decoration: none; }
   opacity: 0.85;
 }
 
-/* ─── PAIE CARDS — tuiles colorées (style planning) ─── */
+/* ─── PAIE CARDS — épuré, fond crème, texte coloré ─── */
 .pcards { display: flex; flex-direction: column; gap: 12px; }
 
 .pcard {
   background: var(--c-surface);
   border: 1px solid var(--c-line);
   border-radius: 16px;
-  padding: 18px;
+  padding: 20px;
   transition: box-shadow .15s;
 }
-.pcard:hover { box-shadow: 0 8px 28px -14px rgba(40,30,20,.16); }
+.pcard:hover { box-shadow: 0 6px 22px -14px rgba(40,30,20,.14); }
 
 .pcard-top {
   display: flex;
   justify-content: space-between;
   align-items: center;
   gap: 12px;
-  margin-bottom: 14px;
+  margin-bottom: 16px;
 }
-.pcard-id { display: flex; align-items: center; gap: 11px; }
+.pcard-id { display: flex; align-items: center; gap: 12px; }
 .pcard-id .av-emp.sm { width: 34px; height: 34px; font-size: 11.5px; }
 .pcard-name {
   font-size: 16px;
@@ -717,11 +717,11 @@ a { color: inherit; text-decoration: none; }
 .pcard-meta {
   font-size: 11.5px;
   color: var(--c-ink-4);
-  margin-top: 2px;
+  margin-top: 3px;
 }
 .pcard-top .btn-ghost { font-size: 11.5px; padding: 5px 10px; flex-shrink: 0; }
 
-/* Colored tiles — same language as planning shifts */
+/* Tiles — uniform cream, only the number is colored */
 .ptiles {
   display: grid;
   grid-template-columns: repeat(6, 1fr);
@@ -731,100 +731,85 @@ a { color: inherit; text-decoration: none; }
 @media (max-width: 540px) { .ptiles { grid-template-columns: repeat(2, 1fr); } }
 
 .ptile {
-  padding: 12px 13px;
+  padding: 13px 14px;
   border-radius: 12px;
   background: var(--c-paper);
 }
+.ptile-key { box-shadow: inset 0 0 0 1.5px #cfe6d6; }
 .ptile-num {
-  font-size: 22px;
+  font-size: 23px;
   font-weight: 700;
-  letter-spacing: -0.03em;
+  letter-spacing: -0.035em;
   line-height: 1;
   color: var(--c-ink);
   display: flex;
   align-items: baseline;
-  gap: 3px;
+  gap: 4px;
   flex-wrap: wrap;
 }
 .ptile-num small {
   font-size: 10.5px;
   font-weight: 600;
   letter-spacing: 0;
-  opacity: 0.6;
+  color: var(--c-ink-5);
 }
 .ptile-lbl {
   font-size: 10px;
   font-weight: 600;
-  letter-spacing: 0.03em;
+  letter-spacing: 0.04em;
   text-transform: uppercase;
-  margin-top: 6px;
-  opacity: 0.72;
+  margin-top: 7px;
+  color: var(--c-ink-4);
 }
 
-/* Tile colors — planning palette */
-.ptile.blue   { background: #dbeafe; }
-.ptile.blue   .ptile-num { color: #1e40af; }
-.ptile.green  { background: #dcfce7; }
-.ptile.green  .ptile-num { color: #15803d; }
-.ptile.amber  { background: #fef9c3; }
-.ptile.amber  .ptile-num { color: #a16207; }
-.ptile.orange { background: #ffedd5; }
-.ptile.orange .ptile-num { color: #c2410c; }
-.ptile.violet { background: #ede9fe; }
-.ptile.violet .ptile-num { color: #6d28d9; }
-.ptile.mute   { background: var(--c-paper); }
-.ptile.mute   .ptile-num { color: var(--c-ink-4); }
-.ptile.solid  { background: #15803d; }
-.ptile.solid  .ptile-num { color: #fff; }
-.ptile.solid  .ptile-lbl { color: #fff; opacity: 0.8; }
+/* Text color classes */
+.c-amber  { color: #b45309 !important; }
+.c-red    { color: #b91c1c !important; }
+.c-green  { color: #15803d !important; }
+.c-mute   { color: var(--c-ink-5) !important; }
 
-/* Secondary info row — light inline */
+/* Secondary info row */
 .pcard-info {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 12px;
+  gap: 7px;
+  margin-top: 14px;
 }
 .pinfo {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 11px;
+  padding: 6px 12px;
   border-radius: var(--r-pill);
   font-size: 11px;
   font-weight: 500;
   color: var(--c-ink-4);
-  background: var(--c-line-2);
+  background: var(--c-paper);
 }
 .pinfo b {
   font-weight: 700;
   font-size: 11.5px;
   color: var(--c-ink);
 }
-.pinfo.hot { background: #fee2e2; color: #b91c1c; }
-.pinfo.hot b { color: #b91c1c; }
-.pinfo.good { background: #dcfce7; color: #15803d; }
-.pinfo.good b { color: #15803d; }
 .pinfo-in {
-  background: var(--c-surface);
-  border: 1px solid var(--c-line);
-  padding: 3px 9px 3px 11px;
+  padding: 3px 10px 3px 12px;
 }
 .pinfo-in input {
-  width: 50px;
+  width: 48px;
   border: none;
-  background: transparent;
+  background: var(--c-surface);
+  border-radius: 5px;
   font-size: 11.5px;
   font-weight: 700;
   text-align: right;
   color: var(--c-ink);
-  padding: 3px 2px;
+  padding: 4px 5px;
 }
-.pinfo-in input:focus { outline: 1px solid #1e40af; border-radius: 4px; }
+.pinfo-in input:focus { outline: 1.5px solid #cfe6d6; }
 .pinfo-in i { font-style: normal; font-size: 10.5px; color: var(--c-ink-4); }
 
-/* 8 weeks row — colored cells, planning style */
-.pcard-weeks { margin-top: 14px; }
+/* 8 weeks row — cream cells, colored numbers */
+.pcard-weeks { margin-top: 16px; }
 .pweeks-lbl {
   font-size: 10px;
   font-weight: 600;
@@ -832,7 +817,7 @@ a { color: inherit; text-decoration: none; }
   text-transform: uppercase;
   color: var(--c-ink-5);
   display: block;
-  margin-bottom: 7px;
+  margin-bottom: 8px;
 }
 .pweeks-row { display: flex; gap: 6px; }
 .pweek {
@@ -841,40 +826,34 @@ a { color: inherit; text-decoration: none; }
   flex-direction: column;
   align-items: center;
   gap: 3px;
-  padding: 9px 2px;
-  border-radius: 9px;
+  padding: 10px 2px;
+  border-radius: 10px;
   background: var(--c-paper);
 }
 .pweek b {
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 700;
-  letter-spacing: -0.02em;
-  color: var(--c-ink-3);
+  letter-spacing: -0.03em;
+  color: var(--c-ink);
 }
+.pweek b.ok    { color: #15803d; }
+.pweek b.over  { color: #b45309; }
+.pweek b.under { color: #b91c1c; }
+.pweek b.empty { color: var(--c-ink-5); }
 .pweek em {
   font-style: normal;
-  font-size: 8.5px;
+  font-size: 9px;
   font-weight: 500;
   color: var(--c-ink-5);
 }
-.pweek.ok    { background: #dcfce7; }
-.pweek.ok    b { color: #15803d; }
-.pweek.over  { background: #ffedd5; }
-.pweek.over  b { color: #c2410c; }
-.pweek.under { background: #fee2e2; }
-.pweek.under b { color: #b91c1c; }
-.pweek.empty b { color: var(--c-ink-5); }
-.pweek.ok em, .pweek.over em, .pweek.under em { color: inherit; opacity: 0.65; }
 
 /* Total équipe card */
-.pcard-total {
-  background: #f7f9fb;
-  border-color: #dde6ee;
-}
+.pcard-total { background: var(--c-paper); }
+.pcard-total .ptile { background: var(--c-surface); }
 .pcard-total .pcard-name { color: var(--c-ink-3); }
 
 @media (max-width: 700px) {
-  .pcard { padding: 14px; }
+  .pcard { padding: 16px; }
   .pweeks-row { flex-wrap: wrap; }
   .pweek { min-width: 58px; flex: 0 1 auto; }
 }
